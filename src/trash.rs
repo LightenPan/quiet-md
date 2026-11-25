@@ -2,7 +2,7 @@
 //! Deleted pages wait in the library's `trash/` for 30 days; each row is a
 //! deleted page together with the child pages that went with it.
 
-use crate::app::{Confirm, ConfirmCancel, ConfirmOk, Workspace};
+use crate::app::{CloseChoice, Confirm, ConfirmCancel, ConfirmOk, Workspace};
 use crate::settings::display_title;
 use crate::search::doc_icon;
 use crate::store::{TRASH_DAYS, TrashEntry};
@@ -376,8 +376,13 @@ impl Workspace {
 
     /// The action button, and ↩ while the dialog is up.
     pub(crate) fn confirm_ok(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.confirm, Some(Confirm::CloseWindow)) {
+            self.choose_close(CloseChoice::Tray, window, cx);
+            return;
+        }
         let Some(c) = self.confirm.take() else { return };
         match c {
+            Confirm::CloseWindow => {}
             Confirm::Delete { ids, batch } => {
                 if batch {
                     self.batch = None;
@@ -446,6 +451,12 @@ impl Workspace {
                 .unwrap_or_default()
         };
         let (title, body, action, danger) = match c {
+            Confirm::CloseWindow => (
+                crate::settings::tr("关闭窗口", "Close window").to_string(),
+                crate::settings::tr("选择要执行的操作。最小化到任务栏会把 Quiet.md 保留在任务栏的通知区域。", "Choose what to do. Minimize to taskbar keeps Quiet.md in the notification area.").to_string(),
+                crate::settings::tr("最小化到任务栏", "Minimize to taskbar"),
+                false,
+            ),
             Confirm::Delete { ids, batch } => (
                 if *batch || ids.len() > 1 { crate::localized_count!(ids.len(), "是否删除所选的 {} 项？", "Delete the {} selected item?", "Delete the {} selected items?", ids.len()) } else { crate::localized_format!("是否删除： {}？", "Delete {}?", title_of(&ids[0])) },
                 crate::settings::text("删除的内容将进入回收站，30 天后自动彻底删除").to_string(),
@@ -537,7 +548,7 @@ impl Workspace {
             .track_focus(&self.confirm_focus)
             .on_action(cx.listener(|w, _: &ConfirmOk, window, cx| w.confirm_ok(window, cx)))
             .on_action(cx.listener(|w, _: &ConfirmCancel, _, cx| w.dismiss_confirm(cx)))
-            .w(px(if matches!(c, Confirm::SaveFailed | Confirm::Migrate(_)) { 520. } else { 400. }))
+            .w(px(if matches!(c, Confirm::SaveFailed | Confirm::Migrate(_)) { 520. } else if matches!(c, Confirm::CloseWindow) { 460. } else { 400. }))
             .px(px(24.))
             .pt(px(20.))
             .pb(px(24.))
@@ -567,21 +578,28 @@ impl Workspace {
                             .child(crate::ui::checkbox(on))
                             .child(ui_text(crate::settings::text("不再提示")))
                     })))
-                    .child(secondary_button("confirm-cancel", if matches!(c, Confirm::Migrate(_)) { crate::settings::tr("稍后", "Later") } else { crate::settings::text("取消") }).on_click(cx.listener(|w, _, _, cx| {
-                        // 稍后 asks again in a week, not at every launch.
-                        if matches!(w.confirm, Some(Confirm::Migrate(_))) { crate::settings::migrate_later(); }
-                        w.dismiss_confirm(cx);
-                    })))
-                    .when(matches!(c, Confirm::SaveFailed), |d| {
-                        d.child(secondary_button("confirm-save-copy", crate::settings::tr("另存副本", "Save a copy")).on_click(cx.listener(|w, _, window, cx| {
-                            w.save_failed_copy(window, cx);
-                        })))
-                        .child(secondary_button("confirm-discard", crate::settings::tr("重新载入", "Reload")).text_color(Theme::danger()).on_click(cx.listener(|w, _, window, cx| {
-                            w.confirm = None;
-                            w.resolve_save_failed(false, window, cx);
-                        })))
+                    .when(matches!(c, Confirm::CloseWindow), |d| {
+                        d.child(primary_button("confirm-tray", crate::settings::tr("最小化到任务栏", "Minimize to taskbar")).on_click(cx.listener(|w, _, window, cx| w.choose_close(CloseChoice::Tray, window, cx))))
+                            .child(secondary_button("confirm-minimize", crate::settings::tr("最小化", "Minimize")).on_click(cx.listener(|w, _, window, cx| w.choose_close(CloseChoice::Minimize, window, cx))))
+                            .child(secondary_button("confirm-exit", crate::settings::tr("退出", "Exit")).on_click(cx.listener(|w, _, window, cx| w.choose_close(CloseChoice::Exit, window, cx))))
                     })
-                    .child(ok.on_click(cx.listener(|w, _, window, cx| w.confirm_ok(window, cx)))),
+                    .when(!matches!(c, Confirm::CloseWindow), |d| {
+                        d.child(secondary_button("confirm-cancel", if matches!(c, Confirm::Migrate(_)) { crate::settings::tr("稍后", "Later") } else { crate::settings::text("取消") }).on_click(cx.listener(|w, _, _, cx| {
+                            // 稍后 asks again in a week, not at every launch.
+                            if matches!(w.confirm, Some(Confirm::Migrate(_))) { crate::settings::migrate_later(); }
+                            w.dismiss_confirm(cx);
+                        })))
+                        .when(matches!(c, Confirm::SaveFailed), |d| {
+                            d.child(secondary_button("confirm-save-copy", crate::settings::tr("另存副本", "Save a copy")).on_click(cx.listener(|w, _, window, cx| {
+                                w.save_failed_copy(window, cx);
+                            })))
+                            .child(secondary_button("confirm-discard", crate::settings::tr("重新载入", "Reload")).text_color(Theme::danger()).on_click(cx.listener(|w, _, window, cx| {
+                                w.confirm = None;
+                                w.resolve_save_failed(false, window, cx);
+                            })))
+                        })
+                        .child(ok.on_click(cx.listener(|w, _, window, cx| w.confirm_ok(window, cx))))
+                    }),
             );
         Some(
             deferred(

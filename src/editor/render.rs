@@ -1736,7 +1736,7 @@ impl Editor {
                     // The note's own labels (list numbers, captions) keep the
                     // platform face; the menus over it follow 界面字体.
                     .font_family(theme::DOC_UI_FONT)
-                    .cursor(CursorStyle::IBeam)
+                    .cursor(if read_only { CursorStyle::Arrow } else { CursorStyle::IBeam })
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
                     .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_click))
                     .on_drag_move(cx.listener(Self::file_drag_move))

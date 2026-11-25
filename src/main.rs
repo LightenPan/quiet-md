@@ -17,6 +17,7 @@ mod shared_store;
 mod quick_note;
 mod assets;
 mod changelog;
+mod collate;
 mod guides;
 mod clipboard;
 #[cfg(feature = "devtools")]
@@ -52,6 +53,8 @@ mod printing;
 mod search;
 #[cfg(not(target_family = "wasm"))]
 mod selftest;
+#[cfg(not(target_family = "wasm"))]
+mod sync_util;
 #[cfg(target_family = "wasm")]
 mod selftest {
     pub fn active() -> bool { false }
@@ -72,6 +75,12 @@ mod themes;
 mod fonts;
 mod font_classes;
 mod font_downloads;
+#[cfg(not(target_family = "wasm"))]
+mod http;
+#[cfg(not(target_family = "wasm"))]
+mod nutstore;
+#[cfg(not(target_family = "wasm"))]
+mod sync_credentials;
 mod shortcuts;
 #[allow(dead_code, unused_imports)]
 mod feishu_theme;
@@ -80,6 +89,7 @@ mod editor_theme;
 #[allow(dead_code, unused_imports)]
 mod editor_ui;
 mod theme;
+mod tray;
 mod transfer;
 mod trash;
 mod tree;
@@ -180,6 +190,8 @@ pub(crate) fn start(existed: bool, scripted: bool, into: Option<&mut Window>, in
     if !scripted && !cfg!(target_family = "wasm") { quick_note::install(cx); }
     app::set_menus(cx);
     update::init(cx);
+    #[cfg(not(target_family = "wasm"))]
+    nutstore::manager::init(cx);
     let took = into.map(|window| window.replace_root(cx, app::Workspace::new));
     if took.is_none() { open_main_window(scripted, None, cx); }
     // A synced library (or one used elsewhere) moves to real folders only once the user agrees.

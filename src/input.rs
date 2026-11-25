@@ -93,6 +93,9 @@ pub struct TextField {
     /// Enter and pasted newlines insert line breaks; Up/Down move by line.
     pub multiline: bool,
     pub mono: bool,
+    /// Draw one `*` per byte while keeping the real text for editing/copying.
+    /// The byte length is unchanged, so selection and caret offsets still map.
+    pub masked: bool,
     /// Fonts by run (`TextSpec::font_runs`).
     pub font_runs: Option<crate::editor::text::FontRuns>,
     /// Longest text in chars (longer input is cut off).
@@ -139,6 +142,7 @@ impl TextField {
             wrap: false,
             multiline: false,
             mono: false,
+            masked: false,
             font_runs: None,
             max_len: None,
             digits: false,
@@ -561,9 +565,10 @@ impl Render for TextField {
         spec.wrap = self.wrap;
         spec.mono = self.mono;
         spec.font_runs = self.font_runs.clone();
+        let shown = if self.masked { "*".repeat(self.text.len()) } else { self.text.clone() };
         let el = RichTextElement {
             id: self.id,
-            text: RichText::plain(self.text.clone()),
+            text: RichText::plain(shown),
             spec,
             align: self.align,
             placeholder: Some(crate::settings::label(self.placeholder.clone()).into()),

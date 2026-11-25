@@ -53,8 +53,8 @@ pub struct Meta {
     /// 收藏时间 (0: not starred).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub starred: u64,
-    /// 阅读模式, remembered per document like the page width.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// 阅读模式, on by default; a document the user switched to 编辑 keeps false.
+    #[serde(default = "reading_default", skip_serializing_if = "is_true")]
     pub reading: bool,
     /// The 文档信息 row under the title.
     #[serde(default, skip_serializing_if = "InfoRow::is_default")]
@@ -134,13 +134,15 @@ impl DocKind {
 fn table_file(p: &Path) -> bool { p.file_name().and_then(|n| n.to_str()).and_then(DocKind::of_name).is_some_and(|k| k.0 == DocKind::Table) }
 
 fn catalogue_closed_default() -> bool { true }
+fn reading_default() -> bool { true }
+fn is_true(value: &bool) -> bool { *value }
 
 impl Default for Meta {
     fn default() -> Self {
         Self {
             folder: None, root_order: None, created: 0, modified: 0, pinned: false, opened: 0,
             width: PageWidth::default(), catalogue_closed: true,
-            parent: None, order: 0, starred: 0, reading: false,
+            parent: None, order: 0, starred: 0, reading: true,
             info: InfoRow::default(), refs_hidden: false,
             markdown: false, path: None, name: None, rel: String::new(), kind: DocKind::Doc,
         }
@@ -174,10 +176,10 @@ fn is_zero(n: &u64) -> bool {
 }
 
 impl Meta {
-    /// Where a page or folder sits among its siblings: the sidebar's order, the
-    /// numbers a drop writes and Home's manual order all use it. Those never
-    /// placed by hand come first, most recently changed first; then the placed
-    /// ones in their order. Callers break remaining ties by id.
+    /// Where a page or folder sits among its siblings: the numbers a drop writes
+    /// and Home's manual order use it. Those never placed by hand come first,
+    /// most recently changed first; then the placed ones in their order.
+    /// Callers break remaining ties by id.
     pub fn place(&self) -> (bool, u64, std::cmp::Reverse<u64>) {
         let placed = if self.parent.is_none() { self.root_order.unwrap_or(0) } else { self.order };
         (placed > 0, placed, std::cmp::Reverse(self.modified))
@@ -463,7 +465,7 @@ struct Attached {
     width: PageWidth,
     #[serde(default = "catalogue_closed_default", skip_serializing_if = "Clone::clone")]
     catalogue_closed: bool,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default = "reading_default", skip_serializing_if = "is_true")]
     reading: bool,
     #[serde(default, skip_serializing_if = "InfoRow::is_default")]
     info: InfoRow,
@@ -4759,6 +4761,22 @@ mod tests {
         let look = RootLook { doc_size: Some("large".into()), ..old };
         Store::save_root_look_at(&lib.0, &look).unwrap();
         assert_eq!(Store::root_look_at(&lib.0), look);
+    }
+
+    /// Documents read unless the user chose 编辑 for that document. An index
+    /// written before this setting omits the field and reads as 阅读模式.
+    #[test]
+    fn documents_default_to_reading_mode() {
+        assert!(Meta::default().reading);
+        let old: Meta = serde_json::from_str(r#"{"created":1,"modified":1}"#).unwrap();
+        assert!(old.reading);
+        let disk: DiskIndex = serde_json::from_str(r#"{"note.xml":{"id":"x"}}"#).unwrap();
+        assert!(disk["note.xml"].meta().reading);
+        let edit = Meta { reading: false, ..Default::default() };
+        let json = serde_json::to_string(&edit).unwrap();
+        assert!(json.contains(r#""reading":false"#));
+        assert!(!serde_json::from_str::<Meta>(&json).unwrap().reading);
+        assert!(serde_json::to_string(&Attached::of("x", &edit)).unwrap().contains(r#""reading":false"#));
     }
 
 }

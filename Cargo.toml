@@ -39,6 +39,7 @@ quick-xml = "0.37"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 unicode-segmentation = "1.13.3"
+unicode-normalization = "0.1.26"
 uuid = { version = "1.28.0", features = ["v4"] }
 image = { version = "0.25", default-features = false, features = ["png", "tiff"] }
 raw-window-handle = "0.6"
@@ -46,6 +47,7 @@ rustc-hash = "2.1"
 web-time = { version = "1", features = ["serde"] }
 katex-rs = { version = "0.3", default-features = false }
 regex = "1"
+pinyin = { version = "0.11.0", default-features = false, features = ["plain"] }
 html5ever = "0.27"
 markup5ever_rcdom = "0.3"
 base64 = "0.22"
@@ -86,6 +88,8 @@ wasm-bindgen-futures = "0.4"
 core-graphics = "0.24"
 core-foundation = "=0.10.0"
 objc = "0.2"
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFData", "CFDictionary", "CFString", "CFBase"] }
+objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecBase", "SecItem"] }
 
 # editor::text::tests drives the macOS text system directly.
 [target.'cfg(target_os = "macos")'.dev-dependencies]
@@ -97,9 +101,10 @@ gpui_wgpu = { path = "vendor/zed/crates/gpui_wgpu" }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-registry = "0.5"
+tray-icon = { version = "0.26.1", default-features = false }
 # PDF and printing (printing.rs): WebView2, on the same `windows` as GPUI.
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Memory", "Win32_UI_Controls_Dialogs", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security_Credentials", "Win32_System_Com", "Win32_System_Memory", "Win32_UI_Controls_Dialogs", "Win32_UI_WindowsAndMessaging"] }
 
 # GPUI is vendored from the Zed repository: an upstream snapshot plus our
 # patch series, kept in sync by tools/vendor-sync (vendor/PATCHES.md).

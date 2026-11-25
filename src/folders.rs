@@ -32,6 +32,8 @@ impl Workspace {
                 self.search_open = false;
                 self.doc_info = None;
                 self.home.sort_menu = false;
+                // A blank document is opened for typing, not reading.
+                let _ = self.store.update_meta(&id, |m| m.reading = false);
                 self.entries = self.store.list();
                 self.sort();
                 match &parent { Some(p) => { self.expanded.insert(p.clone()); } None => self.folded[1] = false }

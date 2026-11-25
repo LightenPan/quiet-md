@@ -496,7 +496,7 @@ pub(crate) fn caption(t: &'static str) -> Div {
 }
 
 /// One setting: title and an optional description on the left, the control on the right.
-fn row(title: impl Into<SharedString>, desc: Option<SharedString>, control: impl IntoElement) -> Div {
+pub(crate) fn row(title: impl Into<SharedString>, desc: Option<SharedString>, control: impl IntoElement) -> Div {
     div().w_full().min_h(px(48.)).px(px(16.)).py(px(10.)).flex().items_center().justify_between().gap(px(24.))
         .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.))
             .child(div().text_size(px(theme::ui_font())).line_height(px(theme::ui_font() + 7.)).text_color(Theme::text()).child(title.into()))
@@ -1696,8 +1696,11 @@ impl Workspace {
         folders.push(row(tr("添加文件夹", "Add a folder"), Some(tr("打开电脑上已有的文件夹，或新建一个，都会显示在侧栏里。", "Open a folder already on your computer, or make a new one; either shows in the sidebar.").into()), div().flex_none().flex().gap(px(8.))
             .child(button("open-root", tr("打开…", "Open…")).on_click(cx.listener(|w, _, window, cx| w.open_folder_dialog(window, cx))))
             .child(button("new-root", tr("新建…", "New…")).on_click(cx.listener(|w, _, window, cx| w.new_root_dialog(window, cx))))).into_any_element());
-        div().w_full().flex().flex_col().gap(px(8.))
-            .child(group(Some(tr("文件夹", "Folders")), folders))
+        let page = div().w_full().flex().flex_col().gap(px(8.))
+            .child(group(Some(tr("文件夹", "Folders")), folders));
+        #[cfg(not(target_family = "wasm"))]
+        let page = page.child(self.nutstore_group(cx));
+        page
             .child(group(None, vec![
                 row(tr("回收站", "Trash"), Some(crate::localized_format!("删除的文档保留 {} 天后自动清除。", "Deleted documents are kept for {} days.", crate::store::TRASH_DAYS).into()),
                     button("open-trash", tr("打开", "Open")).on_click(cx.listener(|w, _, _, cx| w.show_view(View::Trash, cx)))).into_any_element(),

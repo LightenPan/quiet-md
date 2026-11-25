@@ -61,7 +61,7 @@ impl Store {
         let mut groups: HashMap<Option<String>, Vec<String>> = HashMap::new();
         for (id, m) in &self.index { groups.entry(m.parent.clone()).or_default().push(id.clone()); }
         let mut changed = false;
-        // Freeze the order the sidebar shows (`Meta::place`): pages not yet placed
+        // Freeze the order Home's manual sort uses (`Meta::place`): pages not yet placed
         // keep their spot at the top instead of dropping to the end.
         for (parent, mut ids) in groups {
             ids.sort_by(|a, b| (self.index[a].place(), a).cmp(&(self.index[b].place(), b)));
@@ -93,7 +93,7 @@ impl Store {
         // import of N files walk the whole library N times (#216); entries
         // whose file vanished stay unlisted in `list` either way.
         let mut siblings: Vec<String> = self.index.iter().filter(|(_, m)| m.parent.as_deref() == parent).map(|(k, _)| k.clone()).collect();
-        // The sidebar's order (`Meta::place`, ties by id), so the numbers written
+        // Home's manual order (`Meta::place`, ties by id), so the numbers written
         // here match the order the drop was made in.
         siblings.sort_by(|ka, kb| (self.index[ka].place(), ka).cmp(&(self.index[kb].place(), kb)));
         siblings.retain(|key| key != id);

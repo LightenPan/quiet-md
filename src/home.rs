@@ -385,7 +385,7 @@ impl Default for Home {
             grid_scrollbar: Default::default(),
             list_scrollbar: Default::default(),
             search_scrollbar: Default::default(),
-            // Manual: the sidebar's order (`Meta::place`), so both lists read the same.
+            // Manual: the library's order (`Meta::place`).
             sort: HomeSort::Manual,
             folders_first: false,
             sort_menu: false,
@@ -505,7 +505,7 @@ impl Workspace {
     fn sorted_entries(&self, mut v: Vec<Entry>) -> Vec<Entry> {
         v.sort_by(|a, b| {
             let order = match self.home.sort {
-                // The sidebar's order: new pages at the top in both.
+                // The library's manual order: new pages at the top.
                 HomeSort::Manual => (a.meta.place(), &a.id).cmp(&(b.meta.place(), &b.id)),
                 HomeSort::Visited => visited(b).cmp(&visited(a)),
                 HomeSort::Modified => b.meta.modified.cmp(&a.meta.modified),

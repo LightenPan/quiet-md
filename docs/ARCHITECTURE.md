@@ -133,16 +133,21 @@ Whiteboard and history modules in core:
 | `app.rs` | `Workspace`, the two-pane window, open/create/save/delete actions, save state and reminder scheduling |
 | `html.rs` / `printing.rs` / `transfer.rs` | HTML/PDF export, printing and import/export UI |
 | `clipboard.rs` | System clipboard HTML and the simulated clipboard in script mode |
-| `sidebar.rs` / `tree.rs` | Sidebar and document tree, including child pages (a folder's own document, see FORMAT.md and core's `subdocs.rs`) and Move to |
+| `sidebar.rs` / `tree.rs` / `collate.rs` | Sidebar and document tree, including child pages (a folder's own document, see FORMAT.md and core's `subdocs.rs`) and Move to; sibling name order puts numbers first and sorts Han characters by pinyin |
 | `home.rs` / `trash.rs` | Home and trash |
 | `search.rs` | Search dialog and advanced search |
 | `docmenu.rs` / `docinfo.rs` / `modes.rs` | More menu, document information, edit/read mode switch and shortcut panel |
 | `theme.rs` | `craft` scale, semantic `Theme::*` colors, named display colors, `shadow_*`, type scale and note panel dimensions |
 | `ui.rs` / `input.rs` | Shared menu shells and rows, white pill buttons, hints, toasts and single-line input |
+| `tray.rs` | Windows notification-area icon and menu; 最小化到任务栏 hides the main window without quitting |
 | `highlight.rs` | Code highlighting |
 | `mermaid.rs` | Mermaid code blocks drawn as diagrams: bundled mermaid.js in an off-screen web view (macOS, Windows), SVG cached by source and theme |
 | `assets.rs` | Embedded icons, fonts and cover gallery |
 | `fonts.rs` / `font_classes.rs` / `font_downloads.rs` | Installed families for the font settings and what each is (黑体, 宋体 …, scripts covered: read from the font files); fonts fetched on demand (the board's Xiaolai, downloadable document fonts). See [Downloadable fonts](FONTS.md). |
+| `nutstore/` | Nutstore WebDAV content sync ([design](nutstore-sync.md)): application-password auth, PROPFIND/GET/PUT/MOVE, ETag-guarded writes, local state and baselines, three-way merge, conflict copies and lifecycle triggers. It syncs documents, folders and `.assets`, not `.quiet/` metadata. |
+| `sync_util.rs` | Shared content-sync helpers: safe NFC paths, content hashing and baselines, local file whitelist, atomic writes, conflict names and Markdown/DocxXML three-way merge. |
+| `sync_credentials.rs` | Sync secrets at rest in macOS Keychain or Windows Credential Manager, with a private-file fallback elsewhere. |
+| `http.rs` | Blocking HTTP transport over the system `curl`, with stdin config for credentials and an injectable transport for tests. |
 | `devtools.rs` | Script driver compiled with `--features devtools`. See tools/harness/README.md. |
 | `selftest.rs` | Release self-test: fixed end-to-end scenarios that shipped builds run with `--self-test`. See tools/harness/README.md. |
 | `history.rs` | Version drawer grouped by day, in-place read-only preview, change highlighting, naming, restore, save a copy and delete |
@@ -166,7 +171,7 @@ Whiteboard and history modules in core:
 | `link.rs` / `links.rs` | Link panels and cards, document mentions and references |
 | `button.rs` / `countdown.rs` / `reminder.rs` / `subpages.rs` | Buttons, countdowns, date reminders and subpage lists |
 | `emoji.rs` / `emoji_picker.rs` | Emoji data and picker |
-| `catalogue.rs` / `find.rs` / `reading.rs` / `scrollbar.rs` / `caption.rs` | Contents, find/replace, reading mode and info line, scrollbar, code block names and image captions |
+| `catalogue.rs` / `find.rs` / `reading.rs` / `scrollbar.rs` / `caption.rs` | Contents, find/replace, reading mode and info line, scrollbar, code block names and image captions; documents default to reading, while new blank pages and quick notes open for editing |
 
 ## Interface languages
 
@@ -175,6 +180,10 @@ Whiteboard and history modules in core:
 Chinese source strings serve as translation keys. The lookup tables live in `src/l10n/zh_tw.rs`, `ja.rs`, `ko.rs`, `es.rs`, `fr.rs`, `ar.rs` and `tr.rs`. The helpers above use the table first and fall back to English, so new strings can ship before all translations are ready. `localized_format!` uses `l10n::refill` to recover arguments from formatted Chinese and fill the translated template without changing callers. Use `settings::localized` when specifying the language without the macro, as in date reminder tests. `settings::english()` means any language other than Chinese. Run `python3 tools/l10n/keys.py --missing ja` (or `zh_tw`, `ko`, `es`, `fr`, `ar`, `tr`) to list missing keys. The `l10n` tests verify that keys still exist in source and placeholders come from the original template.
 
 User titles, body text, attachment names and saved button labels are user content. Only UI defaults such as the empty-title label change language. The application translates core storage diagnostics from known templates, preserving paths, document IDs and OS error text. The document engine stays independent of interface language. Regression checks cover translation keys, menu tables, reminders, user content and diagnostic arguments.
+
+### Android client
+
+The experimental Android client lives in `third/smartisan-notes/android` as a separate Kotlin/Compose project. Its canonical library is app-private `filesDir/Quiet.md`; Markdown files and folders are authoritative, local metadata carries pin/favorite state, and legacy Room rows are migrated without deleting the database. Nutstore WebDAV sync is implemented directly in Kotlin without a third-party cloud SDK. The specification, non-goals, test plan and release/licensing gate are in [design/android.md](design/android.md).
 
 ## Undo for folders and file operations
 

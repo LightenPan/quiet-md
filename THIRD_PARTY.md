@@ -4,7 +4,7 @@ Quiet.md is distributed under the [MIT license](LICENSE). The following third-pa
 
 ## Rust dependencies
 
-This table lists 767 packages from `cargo metadata` and their declared licenses, including MPL-2.0. Consult each component's license text for its terms.
+This table lists 772 packages from `cargo metadata` and their declared licenses, including MPL-2.0. Consult each component's license text for its terms.
 
 Run `scripts/licences.sh` to regenerate the table from the full dependency list.
 
@@ -139,6 +139,7 @@ GPUI and its Zed dependencies (the `gpui*`, `collections`, `refineable`, `derive
 | dlib | 0.5.3 | MIT |
 | document-features | 0.2.12 | MIT OR Apache-2.0 |
 | downcast-rs | 1.2.1 | MIT/Apache-2.0 |
+| dpi | 0.1.2 | Apache-2.0 AND MIT |
 | dunce | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 |
 | dwrote | 0.11.5 | MPL-2.0 |
 | dyn-clone | 1.0.20 | MIT OR Apache-2.0 |
@@ -278,6 +279,7 @@ GPUI and its Zed dependencies (the `gpui*`, `collections`, `refineable`, `derive
 | js-sys | 0.3.106 | MIT OR Apache-2.0 |
 | katex-rs | 0.3.0 | MIT |
 | khronos-egl | 6.0.0 | MIT/Apache-2.0 |
+| keyboard-types | 0.8.3 | MIT OR Apache-2.0 |
 | kurbo | 0.11.3 | Apache-2.0 OR MIT |
 | kurbo | 0.13.1 | Apache-2.0 OR MIT |
 | kv-log-macro | 1.0.7 | MIT OR Apache-2.0 |
@@ -318,6 +320,7 @@ GPUI and its Zed dependencies (the `gpui*`, `collections`, `refineable`, `derive
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 |
 | moxcms | 0.8.1 | BSD-3-Clause OR Apache-2.0 |
+| muda | 0.21.2 | Apache-2.0 OR MIT |
 | multiversion_no_op | 1.0.0 | Apache-2.0 OR MIT |
 | naga | 30.0.2 | MIT OR Apache-2.0 |
 | naga-types | 30.0.2 | MIT OR Apache-2.0 |
@@ -399,6 +402,7 @@ GPUI and its Zed dependencies (the `gpui*`, `collections`, `refineable`, `derive
 | pin-project | 1.1.13 | Apache-2.0 OR MIT |
 | pin-project-internal | 1.1.13 | Apache-2.0 OR MIT |
 | pin-project-lite | 0.2.17 | Apache-2.0 OR MIT |
+| pinyin | 0.11.0 | MIT |
 | piper | 0.2.5 | MIT OR Apache-2.0 |
 | pkg-config | 0.3.34 | MIT OR Apache-2.0 |
 | png | 0.17.16 | MIT OR Apache-2.0 |
@@ -562,6 +566,7 @@ GPUI and its Zed dependencies (the `gpui*`, `collections`, `refineable`, `derive
 | tracing | 0.1.44 | MIT |
 | tracing-attributes | 0.1.31 | MIT |
 | tracing-core | 0.1.36 | MIT |
+| tray-icon | 0.26.1 | MIT OR Apache-2.0 |
 | ttf-parser | 0.25.1 | MIT OR Apache-2.0 |
 | typenum | 1.20.1 | MIT OR Apache-2.0 |
 | uds_windows | 1.2.1 | MIT |

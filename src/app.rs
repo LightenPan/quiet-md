@@ -216,8 +216,7 @@ pub fn bind_keys(cx: &mut App) {
             // Key dispatch already borrows this window; close after it returns.
             cx.defer(move |cx| {
                 if let Err(e) = handle.update(cx, |ws, window, cx| {
-                    crate::quick_note::persist(cx);
-                    if ws.save_before(cx, |_, window, _| window.remove_window()) { window.remove_window(); }
+                    if ws.request_close(cx) { window.remove_window(); }
                 }) { eprintln!("无法关闭笔记窗口：{e}"); }
             });
         }
@@ -238,6 +237,68 @@ pub fn quit(cx: &mut App) {
         .fold(true, |ready, saved| ready & saved);
     if ready {
         cx.quit();
+    }
+}
+
+/// What 关闭窗口's prompt does next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CloseChoice {
+    Tray,
+    Minimize,
+    Exit,
+}
+
+impl Workspace {
+    /// Whether the window may close now. On Windows a main window asks how to
+    /// close first: 最小化到任务栏 / 最小化 / 退出.
+    pub(crate) fn request_close(&mut self, cx: &mut Context<Self>) -> bool {
+        if crate::tray::available() && !self.quick_note && self.onboarding.is_none() {
+            if self.confirm.is_none() {
+                self.confirm = Some(Confirm::CloseWindow);
+                cx.notify();
+            }
+            return false;
+        }
+        crate::quick_note::persist(cx);
+        self.cancel_shortcut_recording(cx);
+        self.flush_view_state();
+        self.save_before(cx, |_, window, _| window.remove_window())
+    }
+
+    pub(crate) fn choose_close(&mut self, choice: CloseChoice, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.confirm, Some(Confirm::CloseWindow)) { return }
+        self.confirm = None;
+        crate::quick_note::persist(cx);
+        if choice == CloseChoice::Exit {
+            cx.defer(quit);
+            cx.notify();
+            return;
+        }
+        self.cancel_shortcut_recording(cx);
+        self.flush_view_state();
+        let then = move |w: &mut Self, window: &mut Window, cx: &mut Context<Self>| w.finish_close(choice, window, cx);
+        if self.save_before(cx, then) {
+            self.finish_close(choice, window, cx);
+        }
+        cx.notify();
+    }
+
+    fn finish_close(&mut self, choice: CloseChoice, window: &mut Window, cx: &mut Context<Self>) {
+        match choice {
+            CloseChoice::Tray => {
+                let show = crate::settings::tr("显示 Quiet.md", "Show Quiet.md");
+                let quit = crate::settings::tr("退出", "Exit");
+                if let Err(e) = crate::tray::hide(window, show, quit) {
+                    self.show_toast_kind(ToastKind::Error, &crate::localized_format!("无法最小化到任务栏：{}", "Could not minimize to the taskbar: {}", crate::settings::diagnostic(&e)), cx);
+                    window.minimize_window();
+                } else {
+                    crate::tray::start_poll(cx);
+                }
+            }
+            CloseChoice::Minimize => window.minimize_window(),
+            CloseChoice::Exit => {}
+        }
+        cx.notify();
     }
 }
 
@@ -277,6 +338,8 @@ pub enum View {
 /// A confirmation dialog and the pages it is about.
 #[derive(Clone, Debug)]
 pub enum Confirm {
+    /// On Windows: minimize to the notification area, minimize, or quit.
+    CloseWindow,
     /// 删除 (to the 回收站); `batch` for the 批量操作 selection.
     Delete { ids: Vec<String>, batch: bool },
     /// 回收站 → 恢复.
@@ -434,6 +497,8 @@ pub struct Workspace {
     /// Where a drag from outside the tree (the Finder, 本机文件) would land in the sidebar.
     pub sidebar_drop: Option<crate::sidebar_drop::SidebarDropAt>,
     pub move_dlg: Option<crate::tree::MoveDialog>,
+    #[cfg(not(target_family = "wasm"))]
+    pub nutstore_dlg: Option<crate::nutstore::ui::ConnectDialog>,
     /// 导出 Markdown 设置.
     pub export_md: Option<crate::transfer::ExportMd>,
     /// 编辑 / 阅读 dropdown, and the mode button's last-frame bounds.
@@ -525,6 +590,10 @@ impl Workspace {
                 if window.is_window_active() {
                     if let Some(id) = &this.current { crate::quick_note::used(id, cx); }
                     if !this.store.file_task_busy() { this.entries = this.store.list(); this.sort(); this.refresh_markdown(Some(window.window_handle().window_id()), cx); }
+                    #[cfg(not(target_family = "wasm"))]
+                    cx.defer(|cx| {
+                        crate::nutstore::manager::on_window_activated(cx);
+                    });
                     crate::update::check_if_stale(cx); cx.notify();
                 }
                 else if !this.store.file_task_busy() { this.cancel_home_drag(cx); this.end_folder_drag(true, cx); this.cancel_shortcut_recording(cx); this.flush(cx); }
@@ -561,8 +630,7 @@ impl Workspace {
         ];
         let this = cx.weak_entity();
         window.on_window_should_close(cx, move |_, cx| {
-            crate::quick_note::persist(cx);
-            this.update(cx, |w, cx| { w.cancel_shortcut_recording(cx); w.flush_view_state(); w.save_before(cx, |_, window, _| window.remove_window()) }).unwrap_or(true)
+            this.update(cx, |w, cx| w.request_close(cx)).unwrap_or(true)
         });
         if !quick { crate::settings::watch_themes(cx); }
         // A file written into the library from outside (a model writing a
@@ -694,6 +762,8 @@ impl Workspace {
             expanded: HashSet::new(),
             sidebar_drop: None,
             move_dlg: None,
+            #[cfg(not(target_family = "wasm"))]
+            nutstore_dlg: None,
             export_md: None,
             focus: cx.focus_handle(),
             save_task: None,
@@ -791,6 +861,11 @@ impl Workspace {
                 return false;
             }
         };
+        // 快速笔记 is for writing: open it in 编辑模式 without changing the
+        // document's saved 阅读/编辑 preference.
+        if self.quick_note && let Some(e) = self.entries.iter_mut().find(|e| e.id == id) {
+            e.meta.reading = false;
+        }
         let meta = self.entries.iter().find(|e| e.id == id).map(|e| e.meta.clone());
         let modified = meta.as_ref().map_or_else(crate::time::now, |m| m.modified);
         let width = meta.as_ref().map(|m| m.width).unwrap_or_default();
@@ -1392,6 +1467,10 @@ impl Workspace {
                 self.status = SaveStatus::Saved;
                 self.unsaved = false;
                 self.sort();
+                #[cfg(not(target_family = "wasm"))]
+                if let Some(root) = self.store.root_of(&id) {
+                    crate::nutstore::manager::on_saved(&root, cx);
+                }
             }
             Err(e) => self.status = SaveStatus::Failed(crate::localized_format!("保存失败：{}", "Could not save: {}", crate::settings::diagnostic(&e.to_string()))),
         }
@@ -1399,6 +1478,52 @@ impl Workspace {
         self.dirty_since = self.unsaved.then(Instant::now);
         cx.notify();
         !self.unsaved
+    }
+
+    /// A remote sync changed files below `root_key`. Refresh the lists
+    /// in every window; only an open, clean document whose own file changed
+    /// is reloaded, so a background download never resets an unrelated caret.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) fn after_remote_sync(&mut self, root_key: &str, changed: &std::collections::BTreeSet<String>, cx: &mut Context<Self>) {
+        if self.store.file_task_busy() { return }
+        self.entries = self.store.list();
+        self.sort();
+        self.sync_sub_pages(cx);
+        let info = self.current.as_ref().and_then(|id| {
+            self.entries.iter().find(|e| &e.id == id && e.root == root_key)
+                .map(|e| (id.clone(), e.meta.rel.clone(), e.meta.kind))
+        });
+        let Some((id, rel, kind)) = info else { cx.notify(); return };
+        let sibling_unsaved = Self::other_workspaces(cx).into_iter().any(|peer| {
+            let w = peer.read(cx);
+            w.current.as_ref() == Some(&id) && w.unsaved
+        });
+        if sibling_unsaved { cx.notify(); return }
+        let rel_key = crate::sync_util::nfc_path(&rel);
+        if self.unsaved || self.preview.is_some() || !changed.iter().any(|p| crate::sync_util::nfc_path(p) == rel_key) { cx.notify(); return }
+        if kind == crate::store::DocKind::Table {
+            if let (Some(ed), Some(path)) = (&self.editor, self.store.file_path(&id)) {
+                ed.update(cx, |e, cx| { e.table_file_at(&path, cx); cx.notify(); });
+            }
+            cx.notify();
+            return
+        }
+        match self.store.load_for_edit(&id, false) {
+            Ok(doc) => {
+                if self.store.is_markdown(&id) {
+                    self.adopt_markdown(&id, doc, cx);
+                } else if let Some(ed) = &self.editor {
+                    ed.update(cx, |e, cx| { e.receive_document(&crate::editor::core::Core::new(doc), cx); cx.notify(); });
+                }
+                self.save_task = None;
+                self.unsaved = false;
+                self.dirty_since = None;
+                self.status = SaveStatus::Idle;
+                self.sync_links(cx);
+            }
+            Err(e) => self.status = SaveStatus::Failed(crate::localized_format!("重新载入失败：{}", "Could not reload: {}", crate::settings::diagnostic(&e.to_string()))),
+        }
+        cx.notify();
     }
 
     /// Save the open document before something replaces it. When the save
@@ -1936,6 +2061,8 @@ impl Render for Workspace {
             View::Settings => self.render_settings(cx),
         };
         let move_dlg = self.render_move_dialog(cx);
+        #[cfg(not(target_family = "wasm"))]
+        let nutstore_dlg = self.render_nutstore_connect(cx);
         let export_md = self.render_export_md(cx);
         // Only the note stands out: a white plane flush with the window's top,
         // right and bottom edges. The sidebar sits sunken on the window
@@ -1974,8 +2101,7 @@ impl Render for Workspace {
             .on_mouse_move(cx.listener(|w, ev: &MouseMoveEvent, window, cx| w.track_sidebar_press(ev, window, cx)))
             .on_mouse_up(MouseButton::Left, cx.listener(|w, _, window, cx| w.finish_sidebar_click(window, cx)))
             .on_action(cx.listener(|w, _: &CloseWindow, window, cx| {
-                crate::quick_note::persist(cx);
-                if w.save_before(cx, |_, window, _| window.remove_window()) { window.remove_window(); }
+                if w.request_close(cx) { window.remove_window(); }
             }))
             .on_action(|_: &Minimize, window, _| window.minimize_window())
             .on_action(|_: &Zoom, window, _| window.zoom_window())
@@ -2029,10 +2155,17 @@ impl Render for Workspace {
                 }
             }))
             // Esc leaves 批量操作 (closing its menu or confirmation first), even from the editor.
-            .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, _, cx| {
+            .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, window, cx| {
+                let _ = &window;
                 // A required update waits for 立即重启更新 (↩): no key reaches the window beneath.
                 if crate::update::blocking(cx) {
                     if ev.keystroke.key == "enter" { crate::update::install(cx); }
+                    cx.stop_propagation();
+                    return;
+                }
+                #[cfg(not(target_family = "wasm"))]
+                if ev.keystroke.key == "escape" && w.nutstore_dlg.is_some() {
+                    w.close_nutstore_connect(window, cx);
                     cx.stop_propagation();
                     return;
                 }
@@ -2093,6 +2226,12 @@ impl Render for Workspace {
             .children(font_menu)
             .children(confirm)
             .children(move_dlg)
+            .children({
+                #[cfg(not(target_family = "wasm"))]
+                { nutstore_dlg }
+                #[cfg(target_family = "wasm")]
+                { None::<AnyElement> }
+            })
             .children(export_md)
             .children(search)
             .children(resize_overlay)

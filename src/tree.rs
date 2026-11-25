@@ -13,9 +13,9 @@ use crate::ui::{ROW_RADIUS, icon, ui_text};
 use gpui::{prelude::FluentBuilder, *};
 use std::collections::{HashMap, HashSet};
 
-/// Children of every page, keyed by parent (`None`: the top level, in list
-/// order); siblings oldest first. A page whose parent is gone, or that sits
-/// in a parent cycle, is shown at the top level.
+/// Children of every page, keyed by parent (`None`: the top level); siblings
+/// sort by name, with numbers first and Han characters by pinyin. A page whose
+/// parent is gone, or that sits in a parent cycle, is shown at the top level.
 pub(crate) struct Tree<'a> {
     roots: Vec<&'a Entry>,
     kids: HashMap<&'a str, Vec<&'a Entry>>,
@@ -55,11 +55,11 @@ impl<'a> Tree<'a> {
                 roots.push(e);
             }
         }
-        // `Meta::place`, then the id: the list is re-read often (each time the
-        // window comes back) and must come out the same every time.
-        roots.sort_by(|a, b| (a.meta.place(), &a.id).cmp(&(b.meta.place(), &b.id)));
+        // Names: numbers first, Chinese by pinyin, then the id. The list is
+        // re-read often (each time the window comes back), so ties must stay stable.
+        roots.sort_by_cached_key(|e| crate::collate::key(&display_title(&e.title), &e.id));
         for v in kids.values_mut() {
-            v.sort_by(|a, b| (a.meta.place(), &a.id).cmp(&(b.meta.place(), &b.id)));
+            v.sort_by_cached_key(|e| crate::collate::key(&display_title(&e.title), &e.id));
         }
         Tree { roots, kids, notes }
     }
@@ -190,6 +190,8 @@ impl Workspace {
             else { self.store.create_child(parent, &crate::model::Document::default()) };
         match made {
             Ok(id) => {
+                // A blank child page is opened for typing, not reading.
+                let _ = self.store.update_meta(&id, |m| m.reading = false);
                 self.entries = self.store.list();
                 self.sort();
                 if let Some(folder) = self.entries.iter().find(|e| e.id == id).and_then(|e| e.meta.parent.clone()) {
@@ -471,5 +473,40 @@ impl Workspace {
             .with_priority(3)
             .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Tree;
+    use crate::store::{Entry, Meta};
+
+    fn folder(id: &str, title: &str, parent: Option<&str>) -> Entry {
+        Entry {
+            id: id.into(),
+            meta: Meta { folder: Some(title.into()), parent: parent.map(str::to_string), ..Default::default() },
+            title: title.into(),
+            icon: None,
+            body: "".into(),
+            reminders: vec![],
+            links: vec![],
+            note: None,
+            root: String::new(),
+        }
+    }
+
+    #[test]
+    fn sorts_folders_by_name() {
+        let entries = [
+            folder("root", "为知笔记", None),
+            folder("a", "微信收藏", Some("root")),
+            folder("b", "05.自己积累", Some("root")),
+            folder("c", "My Notes", Some("root")),
+            folder("d", "服务信息", Some("root")),
+        ];
+        let tree = Tree::new(&entries);
+        let titles = |rows: &[&Entry]| rows.iter().map(|e| e.title.clone()).collect::<Vec<_>>();
+        assert_eq!(titles(tree.children(None)), ["为知笔记"]);
+        assert_eq!(titles(tree.children(Some("root"))), ["05.自己积累", "服务信息", "My Notes", "微信收藏"]);
     }
 }
