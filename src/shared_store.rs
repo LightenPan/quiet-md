@@ -50,6 +50,9 @@ impl SharedStore {
     /// After roots came or went: whether there is a root's look to use.
     fn roots_changed(&self) { crate::settings::set_has_roots(self.0.borrow().ws.first().is_some()); }
     pub fn file_task_busy(&self) -> bool { self.1.load(Ordering::Acquire) }
+    /// The flag a file task holds. A background sync takes it only while it
+    /// writes the library, so a long upload no longer freezes the window.
+    pub fn file_task_lock(&self) -> Arc<AtomicBool> { self.1.clone() }
     pub fn begin_file_task(&self) -> Option<FileTaskGuard> {
         self.1.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok().then(|| FileTaskGuard(self.1.clone()))
     }

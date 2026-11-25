@@ -261,7 +261,7 @@ fn start_connect(root_key: &str, config: Config, password: Option<String>, cx: &
         refresh(cx);
         return
     }
-    let Some(_guard) = cx.try_global::<crate::shared_store::SharedStore>().and_then(|s| s.begin_file_task()) else { return };
+    let local_lock = cx.try_global::<crate::shared_store::SharedStore>().map(|s| s.file_task_lock());
     let busy = with_manager(|m| {
         let Some(slot) = m.roots.get_mut(root_key) else { return true };
         if slot.busy { return true }
@@ -280,9 +280,8 @@ fn start_connect(root_key: &str, config: Config, password: Option<String>, cx: &
     let key = root_key.to_string();
     let policy = with_manager(|m| m.roots.get(root_key).map(|s| s.next_policy).unwrap_or(InitialPolicy::Ask));
     app.spawn(async move |cx| {
-        let options = SyncOptions { local_root: info.path, cache_dir: info.cache.clone(), config: config.clone(), device_name: device_name() };
+        let options = SyncOptions { local_root: info.path, cache_dir: info.cache.clone(), config: config.clone(), device_name: device_name(), local_lock };
         let result = cx.background_spawn(async move { connect_and_sync(options, config, password, policy) }).await;
-        drop(_guard);
         cx.update(|cx| finish_connect(&key, epoch, result, cx));
     })
     .detach();
@@ -300,7 +299,10 @@ fn connect_and_sync(options: SyncOptions, config: Config, password: String, poli
     }
     store.save_config(&config).map_err(|e| SyncFailure::message(e.to_string()))?;
     let mut engine = SyncEngine::open(SyncOptions { config: config.clone(), ..options }).map_err(|e| SyncFailure::message(e.to_string()))?;
-    let outcome = engine.sync(&client, policy).map_err(SyncFailure::from_anyhow)?;
+    let outcome = engine.sync(&client, policy).map_err(|e| {
+        log::warn!("Nutstore connect and sync failed: {e:#}");
+        SyncFailure::from_anyhow(e)
+    })?;
     Ok((outcome, config))
 }
 
@@ -360,7 +362,7 @@ fn start_sync(root_key: &str, cx: &mut App) {
         refresh(cx);
         return
     }
-    let Some(guard) = cx.try_global::<crate::shared_store::SharedStore>().and_then(|s| s.begin_file_task()) else { return };
+    let local_lock = cx.try_global::<crate::shared_store::SharedStore>().map(|s| s.file_task_lock());
     let policy = with_manager(|m| {
         let slot = m.roots.get_mut(root_key).unwrap();
         slot.busy = true;
@@ -378,9 +380,8 @@ fn start_sync(root_key: &str, cx: &mut App) {
     let epoch = with_manager(|m| m.epoch);
     let key = root_key.to_string();
     app.spawn(async move |cx| {
-        let options = SyncOptions { local_root: info.path, cache_dir: info.cache, config: info.config, device_name: device_name() };
+        let options = SyncOptions { local_root: info.path, cache_dir: info.cache, config: info.config, device_name: device_name(), local_lock };
         let result = cx.background_spawn(async move { run_sync(options, password, policy) }).await;
-        drop(guard);
         cx.update(|cx| finish_sync(&key, epoch, result, cx));
     })
     .detach();
@@ -389,7 +390,10 @@ fn start_sync(root_key: &str, cx: &mut App) {
 fn run_sync(options: SyncOptions, password: String, policy: InitialPolicy) -> Result<(SyncOutcome, String), SyncFailure> {
     let client = NutstoreClient::connect(&options.config, &password).map_err(SyncFailure::message)?;
     let mut engine = SyncEngine::open(options).map_err(|e| SyncFailure::message(e.to_string()))?;
-    let outcome = engine.sync(&client, policy).map_err(SyncFailure::from_anyhow)?;
+    let outcome = engine.sync(&client, policy).map_err(|e| {
+        log::warn!("Nutstore sync failed: {e:#}");
+        SyncFailure::from_anyhow(e)
+    })?;
     Ok((outcome, engine.state().username.clone()))
 }
 

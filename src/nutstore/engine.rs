@@ -13,6 +13,8 @@ use anyhow::{Context as _, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Clone, Debug)]
 pub struct SyncOptions {
@@ -21,6 +23,8 @@ pub struct SyncOptions {
     pub cache_dir: PathBuf,
     pub config: Config,
     pub device_name: String,
+    /// Shared with the window's file tasks; held only around local writes.
+    pub local_lock: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -62,6 +66,12 @@ pub struct SyncEngine {
     state: State,
     load_warning: Option<String>,
     unsaved: u32,
+    lock_depth: u32,
+}
+
+struct LocalLockGuard(Arc<AtomicBool>);
+impl Drop for LocalLockGuard {
+    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
 }
 
 impl SyncEngine {
@@ -75,10 +85,28 @@ impl SyncEngine {
             state: loaded.state,
             load_warning: loaded.damaged.map(|p| format!("坚果云同步状态已损坏，旧文件保留在 {}", p.display())),
             unsaved: 0,
+            lock_depth: 0,
         })
     }
 
     pub fn state(&self) -> &State { &self.state }
+
+    /// Runs `f` while the window's file tasks are held off. Network waits and
+    /// uploads stay outside: a first sync can take hours and the window must
+    /// keep working for all of them. Nested calls reuse the outer hold.
+    fn with_local_lock<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.lock_depth > 0 { return f(self) }
+        let Some(flag) = self.options.local_lock.clone() else { return f(self) };
+        while flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_err() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let guard = LocalLockGuard(flag);
+        self.lock_depth = 1;
+        let result = f(self);
+        self.lock_depth = 0;
+        drop(guard);
+        result
+    }
     pub fn sync(&mut self, api: &dyn WebDavApi, policy: InitialPolicy) -> Result<SyncOutcome> {
         let result = self.sync_inner(api, policy);
         // Keep what this run already uploaded or downloaded: the next attempt
@@ -153,7 +181,7 @@ impl SyncEngine {
                     let known = self.state.files.keys().cloned().collect::<Vec<_>>();
                     let conflict = fresh_conflict_path(&self.options.local_root, rel, &self.options.device_name, known.iter())?;
                     let conflict_path = join(&self.options.local_root, &conflict)?;
-                    sync_util::write_atomic(&conflict_path, &bytes)?;
+                    self.with_local_lock(|_| sync_util::write_atomic(&conflict_path, &bytes))?;
                     self.upload_new(api, &conflict, &bytes, report)?;
                     self.remember_without_base(rel, entry)?;
                     report.conflicts += 1;
@@ -185,18 +213,21 @@ impl SyncEngine {
             if let (Some(path), Some(entry)) = (local.files.get(old), remote.files.get(new)) {
                 let old_abs = join(&self.options.local_root, old)?;
                 let new_abs = join(&self.options.local_root, new)?;
-                if new_abs.exists() { bail!("坚果云改名后的目标位置已有本机文件，暂停同步：{new}") }
-                if path.sha256 == self.state.files.get(old).map(|s| s.sha256.as_str()).unwrap_or("") {
-                    if let Some(parent) = new_abs.parent() { fs::create_dir_all(parent)?; }
-                    fs::rename(&old_abs, &new_abs).with_context(|| format!("移动 {} 到 {}", old_abs.display(), new_abs.display()))?;
-                    if let Some(state) = self.state.files.remove(old) {
-                        self.state.files.insert(new.clone(), FileState {
-                            etag: entry.etag.clone(), size: entry.size, modified: entry.modified.clone(), sha256: state.sha256,
-                        });
+                self.with_local_lock(|e| {
+                    if new_abs.exists() { bail!("坚果云改名后的目标位置已有本机文件，暂停同步：{new}") }
+                    if path.sha256 == e.state.files.get(old).map(|s| s.sha256.as_str()).unwrap_or("") {
+                        if let Some(parent) = new_abs.parent() { fs::create_dir_all(parent)?; }
+                        fs::rename(&old_abs, &new_abs).with_context(|| format!("移动 {} 到 {}", old_abs.display(), new_abs.display()))?;
+                        if let Some(state) = e.state.files.remove(old) {
+                            e.state.files.insert(new.clone(), FileState {
+                                etag: entry.etag.clone(), size: entry.size, modified: entry.modified.clone(), sha256: state.sha256,
+                            });
+                        }
+                        report.changed_paths.insert(old.clone());
+                        report.changed_paths.insert(new.clone());
                     }
-                    report.changed_paths.insert(old.clone());
-                    report.changed_paths.insert(new.clone());
-                }
+                    Ok(())
+                })?;
             }
         }
         self.state.folders = remote.dirs.clone();
@@ -244,7 +275,6 @@ impl SyncEngine {
             report.warnings.push(format!("{rel} 超过 100 MB，未下载"));
             return Ok(())
         }
-        let path = join(&self.options.local_root, rel)?;
         let old = self.state.files.get(rel).cloned();
         if old.is_some() && !remote_changed(old.as_ref().unwrap(), entry) {
             if let Some(old) = old {
@@ -253,14 +283,19 @@ impl SyncEngine {
             return Ok(())
         }
         let bytes = api.get(rel)?;
-        let remote_sha = sha256(&bytes);
+        self.with_local_lock(|e| e.apply_remote_bytes(api, rel, entry, &bytes, old, report))
+    }
+
+    fn apply_remote_bytes(&mut self, api: &dyn WebDavApi, rel: &str, entry: &RemoteEntry, bytes: &[u8], old: Option<FileState>, report: &mut SyncReport) -> Result<()> {
+        let path = join(&self.options.local_root, rel)?;
+        let remote_sha = sha256(bytes);
         if !path.is_file() {
-            self.write_download(entry, rel, &bytes, report)?;
+            self.write_download(entry, rel, bytes, report)?;
             return Ok(())
         }
         let ours = read_limited(&path, MAX_BYTES)?;
         if sha256(&ours) == remote_sha {
-            self.store.put_base(&remote_sha, &bytes)?;
+            self.store.put_base(&remote_sha, bytes)?;
             self.remember(rel, entry, remote_sha)?;
             return Ok(())
         }
@@ -268,8 +303,8 @@ impl SyncEngine {
             let known = self.state.files.keys().cloned().collect::<Vec<_>>();
             let conflict = fresh_conflict_path(&self.options.local_root, rel, &self.options.device_name, known.iter())?;
             let conflict_path = join(&self.options.local_root, &conflict)?;
-            sync_util::write_atomic(&conflict_path, &bytes)?;
-            if let Err(e) = self.upload_new(api, &conflict, &bytes, report) {
+            sync_util::write_atomic(&conflict_path, bytes)?;
+            if let Err(e) = self.upload_new(api, &conflict, bytes, report) {
                 report.warnings.push(format!("{conflict} 只保存在本机：{e}"));
             }
             self.remember_without_base(rel, entry)?;
@@ -279,20 +314,20 @@ impl SyncEngine {
         };
         let local_changed = sha256(&ours) != old.sha256;
         if !local_changed {
-            self.write_download(entry, rel, &bytes, report)?;
+            self.write_download(entry, rel, bytes, report)?;
             return Ok(())
         }
         let base = self.store.base(&old.sha256).ok();
         if is_text_document(rel)
             && let Some(base) = base {
-            self.merge_remote(api, rel, entry, &base, &ours, &bytes, report)?;
+            self.merge_remote(api, rel, entry, &base, &ours, bytes, report)?;
             return Ok(())
         }
         let known = self.state.files.keys().cloned().collect::<Vec<_>>();
         let conflict = fresh_conflict_path(&self.options.local_root, rel, &self.options.device_name, known.iter())?;
         let conflict_path = join(&self.options.local_root, &conflict)?;
-        sync_util::write_atomic(&conflict_path, &bytes)?;
-        if let Err(e) = self.upload_new(api, &conflict, &bytes, report) {
+        sync_util::write_atomic(&conflict_path, bytes)?;
+        if let Err(e) = self.upload_new(api, &conflict, bytes, report) {
             report.warnings.push(format!("{conflict} 只保存在本机：{e}"));
         }
         self.remember_without_base(rel, entry)?;
@@ -302,14 +337,16 @@ impl SyncEngine {
     }
 
     fn write_download(&mut self, entry: &RemoteEntry, rel: &str, bytes: &[u8], report: &mut SyncReport) -> Result<()> {
-        let path = join(&self.options.local_root, rel)?;
-        sync_util::write_atomic(&path, bytes)?;
-        let hash = sha256(bytes);
-        self.store.put_base(&hash, bytes)?;
-        self.remember(rel, entry, hash)?;
-        report.downloaded += 1;
-        report.changed_paths.insert(rel.to_string());
-        Ok(())
+        self.with_local_lock(|e| {
+            let path = join(&e.options.local_root, rel)?;
+            sync_util::write_atomic(&path, bytes)?;
+            let hash = sha256(bytes);
+            e.store.put_base(&hash, bytes)?;
+            e.remember(rel, entry, hash)?;
+            report.downloaded += 1;
+            report.changed_paths.insert(rel.to_string());
+            Ok(())
+        })
     }
 
     fn merge_remote(&mut self, api: &dyn WebDavApi, rel: &str, entry: &RemoteEntry, base: &[u8], ours: &[u8], theirs: &[u8], report: &mut SyncReport) -> Result<()> {
@@ -440,18 +477,20 @@ impl SyncEngine {
     }
 
     fn drop_remote(&mut self, rel: &str, report: &mut SyncReport) -> Result<()> {
-        let Some(old) = self.state.files.remove(rel) else { return Ok(()) };
-        let path = join(&self.options.local_root, rel)?;
-        if !path.is_file() { return Ok(()) }
-        let bytes = read_limited(&path, MAX_BYTES)?;
-        if sha256(&bytes) != old.sha256 {
-            report.warnings.push(format!("{rel} 在坚果云被删除，但本机有修改；保留本机版本并重新上传"));
-            return Ok(())
-        }
-        self.store.quarantine(&self.options.local_root, rel)?;
-        report.changed_paths.insert(rel.to_string());
-        report.local_moved_to_recovery += 1;
-        Ok(())
+        self.with_local_lock(|e| {
+            let Some(old) = e.state.files.remove(rel) else { return Ok(()) };
+            let path = join(&e.options.local_root, rel)?;
+            if !path.is_file() { return Ok(()) }
+            let bytes = read_limited(&path, MAX_BYTES)?;
+            if sha256(&bytes) != old.sha256 {
+                report.warnings.push(format!("{rel} 在坚果云被删除，但本机有修改；保留本机版本并重新上传"));
+                return Ok(())
+            }
+            e.store.quarantine(&e.options.local_root, rel)?;
+            report.changed_paths.insert(rel.to_string());
+            report.local_moved_to_recovery += 1;
+            Ok(())
+        })
     }
 
     fn cleanup_dirs(&self, old: &BTreeSet<String>) -> Result<()> {
@@ -560,6 +599,7 @@ mod tests {
         dirs: Mutex<BTreeSet<String>>,
         n: Mutex<u64>,
         fail_puts: Mutex<Option<u32>>,
+        local_lock: Mutex<Option<Arc<AtomicBool>>>,
     }
 
     impl Fake {
@@ -597,6 +637,9 @@ mod tests {
             self.files.lock().unwrap().get(rel).map(|f| f.bytes.clone()).ok_or_else(|| WebDavError::new(WebDavErrorKind::NotFound, "missing"))
         }
         fn put(&self, rel: &str, bytes: &[u8], expected: Option<&str>) -> WebDavResult<RemoteEntry> {
+            if let Some(flag) = self.local_lock.lock().unwrap().as_ref() {
+                assert!(!flag.load(Ordering::Acquire), "an upload held the window's file task lock");
+            }
             if let Some(remaining) = self.fail_puts.lock().unwrap().as_mut() {
                 if *remaining == 0 {
                     return Err(WebDavError::new(WebDavErrorKind::RateLimited, "Too many requests").with_status(503))
@@ -643,7 +686,7 @@ mod tests {
     }
 
     fn opts(root: &Path, cache: &Path) -> SyncOptions {
-        SyncOptions { local_root: root.into(), cache_dir: cache.into(), config: Config { server: "https://dav.example/dav/".into(), username: "a@b".into(), remote_root: "Quiet.md".into() }, device_name: "Test".into() }
+        SyncOptions { local_root: root.into(), cache_dir: cache.into(), config: Config { server: "https://dav.example/dav/".into(), username: "a@b".into(), remote_root: "Quiet.md".into() }, device_name: "Test".into(), local_lock: None }
     }
 
     fn write(root: &Path, rel: &str, bytes: &[u8]) {
@@ -667,6 +710,20 @@ mod tests {
         let SyncOutcome::Synced(r) = e2.sync(&fake, InitialPolicy::DownloadRemote).unwrap() else { panic!() };
         assert_eq!(r.downloaded, 1);
         assert_eq!(fs::read(root2.join("a.md")).unwrap(), b"# A\n");
+    }
+
+    #[test]
+    fn uploads_leave_the_window_lock_free() {
+        let (root, cache) = temp("upload-lock");
+        write(&root, "a.md", b"# A\n");
+        let flag = Arc::new(AtomicBool::new(false));
+        let fake = Fake::default();
+        *fake.local_lock.lock().unwrap() = Some(flag.clone());
+        let options = SyncOptions { local_lock: Some(flag.clone()), ..opts(&root, &cache) };
+        let mut e = SyncEngine::open(options).unwrap();
+        e.sync(&fake, InitialPolicy::UploadLocal).unwrap();
+        assert!(fake.files.lock().unwrap().contains_key("a.md"));
+        assert!(!flag.load(Ordering::Acquire));
     }
 
     #[test]

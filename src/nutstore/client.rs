@@ -144,8 +144,11 @@ impl WebDavApi for NutstoreClient {
 
     fn scan(&self) -> WebDavResult<Vec<RemoteEntry>> {
         match self.scan_deep() {
-            Ok(entries) if entries.len() < 750 => Ok(entries),
-            Ok(_) => self.scan_levels(),
+            Ok(entries) if entries.len() >= 750 => self.scan_levels(),
+            // Nutstore answers `Depth: infinity` with one level only. A result
+            // holding folders but nothing below them is not the whole tree.
+            Ok(entries) if entries.iter().any(|e| e.is_dir) && !entries.iter().any(|e| e.rel.contains('/')) => self.scan_levels(),
+            Ok(entries) => Ok(entries),
             Err(e) if matches!(e.status, Some(400 | 403 | 405 | 501 | 507)) || matches!(e.kind, WebDavErrorKind::Other | WebDavErrorKind::NotFound) => self.scan_levels(),
             Err(e) => Err(e),
         }
@@ -367,12 +370,32 @@ mod tests {
     fn config() -> Config { Config { server: "https://dav.example/dav/".into(), username: "a@b".into(), remote_root: "Quiet.md".into() } }
     fn client(mock: Arc<Mock>) -> NutstoreClient { NutstoreClient::with_parts(&config(), "app-password", mock) }
 
+    const TOP: &str = r#"<?xml version="1.0"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response><D:href>/dav/Quiet.md/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>
+  <D:response><D:href>/dav/Quiet.md/Work/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat></D:response>
+</D:multistatus>"#;
+
     const LIST: &str = r#"<?xml version="1.0"?>
 <D:multistatus xmlns:D="DAV:">
   <D:response><D:href>/dav/Quiet.md/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
   <D:response><D:href>/dav/Quiet.md/Work/</D:href><D:propstat><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
   <D:response><D:href>/dav/Quiet.md/Work/%E5%91%A8%E6%8A%A5.md</D:href><D:propstat><D:prop><D:resourcetype/><D:getetag>"e1"</D:getetag><D:getcontentlength>12</D:getcontentlength></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>
 </D:multistatus>"#;
+
+    #[test]
+    fn one_level_infinity_results_are_not_taken_for_the_whole_tree() {
+        let mock = Arc::new(Mock {
+            replies: Mutex::new(vec![response(207, TOP), response(207, TOP), response(207, LIST)]),
+            seen: Mutex::new(vec![]),
+        });
+        let entries = client(mock.clone()).scan().unwrap();
+        assert!(entries.iter().any(|e| e.rel == "Work/周报.md"));
+        let seen = mock.seen.lock().unwrap();
+        assert_eq!(seen[0].header_value("Depth"), Some("infinity"));
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[1].header_value("Depth"), Some("1"));
+    }
 
     #[test]
     fn parses_multistatus_paths_and_collections() {
