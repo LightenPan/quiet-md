@@ -61,6 +61,7 @@ pub struct SyncEngine {
     store: StateStore,
     state: State,
     load_warning: Option<String>,
+    unsaved: u32,
 }
 
 impl SyncEngine {
@@ -73,11 +74,19 @@ impl SyncEngine {
             store,
             state: loaded.state,
             load_warning: loaded.damaged.map(|p| format!("坚果云同步状态已损坏，旧文件保留在 {}", p.display())),
+            unsaved: 0,
         })
     }
 
     pub fn state(&self) -> &State { &self.state }
     pub fn sync(&mut self, api: &dyn WebDavApi, policy: InitialPolicy) -> Result<SyncOutcome> {
+        let result = self.sync_inner(api, policy);
+        // Keep what this run already uploaded or downloaded: the next attempt
+        // continues it instead of starting the whole transfer again.
+        if result.is_err() { let _ = self.store.save(&self.state); }
+        result
+    }
+    fn sync_inner(&mut self, api: &dyn WebDavApi, policy: InitialPolicy) -> Result<SyncOutcome> {
         api.probe()?;
         let config = &self.options.config;
         if !self.state.server.is_empty()
@@ -122,6 +131,10 @@ impl SyncEngine {
         if policy == InitialPolicy::DownloadRemote && local_has { bail!("本地文件夹已有文件；若要保留两边，请选择合并两边") }
 
         self.state.folders = remote.dirs.clone();
+        // The scan is complete before the transfer starts, so an interrupted
+        // first sync resumes through reconcile instead of asking to merge again.
+        self.state.scan_complete = true;
+        self.store.save(&self.state)?;
 
         if remote_has && local_has && policy == InitialPolicy::MergeBoth {
             for (rel, entry) in &remote.files {
@@ -149,8 +162,6 @@ impl SyncEngine {
             }
             let after = sync_util::scan_local(&self.options.local_root)?;
             self.push_local(api, &after, report)?;
-            self.state.scan_complete = true;
-            self.store.save(&self.state)?;
             return Ok(None)
         }
 
@@ -163,8 +174,6 @@ impl SyncEngine {
         if local_has && (!remote_has || policy == InitialPolicy::UploadLocal) {
             self.upload_missing_local(api, local, report)?;
         }
-        self.state.scan_complete = true;
-        self.store.save(&self.state)?;
         Ok(None)
     }
 
@@ -456,9 +465,21 @@ impl SyncEngine {
     }
 
     fn remember(&mut self, rel: &str, entry: &RemoteEntry, hash: String) -> Result<()> {
-        self.state.files.insert(nfc_path(rel), FileState {
+        let rel = nfc_path(rel);
+        let unchanged = self.state.files.get(&rel).is_some_and(|old| {
+            old.etag == entry.etag && old.size == entry.size && old.modified == entry.modified && old.sha256 == hash
+        });
+        if unchanged { return Ok(()) }
+        self.state.files.insert(rel, FileState {
             etag: entry.etag.clone(), size: entry.size, modified: entry.modified.clone(), sha256: hash,
         });
+        // A first sync of a large library runs for a long time; keep its
+        // progress instead of losing it if the app closes or the network drops.
+        self.unsaved += 1;
+        if self.unsaved >= 25 {
+            let _ = self.store.save(&self.state);
+            self.unsaved = 0;
+        }
         Ok(())
     }
 
@@ -538,6 +559,7 @@ mod tests {
         files: Mutex<BTreeMap<String, FakeFile>>,
         dirs: Mutex<BTreeSet<String>>,
         n: Mutex<u64>,
+        fail_puts: Mutex<Option<u32>>,
     }
 
     impl Fake {
@@ -575,6 +597,12 @@ mod tests {
             self.files.lock().unwrap().get(rel).map(|f| f.bytes.clone()).ok_or_else(|| WebDavError::new(WebDavErrorKind::NotFound, "missing"))
         }
         fn put(&self, rel: &str, bytes: &[u8], expected: Option<&str>) -> WebDavResult<RemoteEntry> {
+            if let Some(remaining) = self.fail_puts.lock().unwrap().as_mut() {
+                if *remaining == 0 {
+                    return Err(WebDavError::new(WebDavErrorKind::RateLimited, "Too many requests").with_status(503))
+                }
+                *remaining -= 1;
+            }
             let files = self.files.lock().unwrap();
             match expected {
                 Some("") => {}
@@ -639,6 +667,25 @@ mod tests {
         let SyncOutcome::Synced(r) = e2.sync(&fake, InitialPolicy::DownloadRemote).unwrap() else { panic!() };
         assert_eq!(r.downloaded, 1);
         assert_eq!(fs::read(root2.join("a.md")).unwrap(), b"# A\n");
+    }
+
+    #[test]
+    fn an_interrupted_first_upload_resumes_from_where_it_stopped() {
+        let (root, cache) = temp("resume");
+        write(&root, "a.md", b"# A\n");
+        write(&root, "b.md", b"# B\n");
+        let fake = Fake::default();
+        *fake.fail_puts.lock().unwrap() = Some(1);
+        let mut e = SyncEngine::open(opts(&root, &cache)).unwrap();
+        assert!(e.sync(&fake, InitialPolicy::UploadLocal).is_err());
+        assert!(fake.files.lock().unwrap().contains_key("a.md"));
+        assert!(!fake.files.lock().unwrap().contains_key("b.md"));
+
+        *fake.fail_puts.lock().unwrap() = None;
+        let mut e = SyncEngine::open(opts(&root, &cache)).unwrap();
+        let SyncOutcome::Synced(r) = e.sync(&fake, InitialPolicy::Ask).unwrap() else { panic!() };
+        assert_eq!(r.uploaded, 1);
+        assert!(fake.files.lock().unwrap().contains_key("b.md"));
     }
 
     #[test]

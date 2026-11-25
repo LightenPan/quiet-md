@@ -651,7 +651,7 @@ fn noproxy_host(e: &str) -> Option<String> {
 }
 
 /// A command that opens no console window on Windows.
-fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+pub(crate) fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     #[allow(unused_mut)]
     let mut c = Command::new(program);
     #[cfg(target_os = "windows")]

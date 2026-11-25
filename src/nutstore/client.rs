@@ -68,7 +68,7 @@ impl NutstoreClient {
         request.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("Authorization"));
         request.headers.push(("Authorization".into(), self.auth.clone()));
         let response = self.transport.send(&request).map_err(WebDavError::other)?;
-        if (response.status == 429 || response.status == 503) && response.header("retry-after").is_some() {
+        if response.status == 429 || response.status == 503 {
             let retry = response.header("retry-after").and_then(|s| s.parse::<u64>().ok()).map(Duration::from_secs);
             return Err(map_error(&response).with_retry(retry))
         }
@@ -166,8 +166,17 @@ impl WebDavApi for NutstoreClient {
             Some(etag) => request.header("If-Match", etag),
             None => request.header("If-None-Match", "*"),
         };
-        self.send(request)?;
-        self.stat(rel)
+        let response = self.send(request)?;
+        // Most servers return the new ETag with the PUT; asking again for the
+        // same properties would double the requests each upload costs.
+        let Some(etag) = response.header("etag") else { return self.stat(rel) };
+        Ok(RemoteEntry {
+            rel: rel.into(),
+            is_dir: false,
+            etag: Some(etag.to_string()),
+            size: response.header("content-length").and_then(|s| s.parse().ok()),
+            modified: response.header("last-modified").map(str::to_string),
+        })
     }
 
     fn create_dir(&self, rel: &str) -> WebDavResult<()> {
@@ -206,7 +215,7 @@ fn map_error(response: &HttpResponse) -> WebDavError {
         403 => WebDavErrorKind::Auth,
         404 => WebDavErrorKind::NotFound,
         409 | 412 | 423 => WebDavErrorKind::Conflict,
-        429 => WebDavErrorKind::RateLimited,
+        429 | 503 => WebDavErrorKind::RateLimited,
         500..=599 => WebDavErrorKind::Server,
         _ => WebDavErrorKind::Other,
     };
@@ -405,6 +414,42 @@ mod tests {
         let seen = mock.seen.lock().unwrap();
         assert_eq!(seen[0].header_value("If-Match"), Some("\"old\""));
         assert_eq!(seen[2].header_value("If-None-Match"), Some("*"));
+    }
+
+    #[test]
+    fn put_uses_the_response_etag_instead_of_asking_again() {
+        let mock = Arc::new(Mock {
+            replies: Mutex::new(vec![HttpResponse {
+                status: 201,
+                headers: vec![
+                    ("ETag".into(), "\"new\"".into()),
+                    ("Content-Length".into(), "1".into()),
+                    ("Last-Modified".into(), "Wed, 25 Nov 2026 15:00:00 GMT".into()),
+                ],
+                body: vec![],
+            }]),
+            seen: Mutex::new(vec![]),
+        });
+        let entry = client(mock.clone()).put("a.md", b"a", None).unwrap();
+        assert_eq!(entry.etag.as_deref(), Some("\"new\""));
+        assert_eq!(entry.size, Some(1));
+        assert_eq!(mock.seen.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_503_is_a_rate_limit_with_the_server_retry_after() {
+        let mock = Arc::new(Mock {
+            replies: Mutex::new(vec![HttpResponse {
+                status: 503,
+                headers: vec![("Retry-After".into(), "42".into())],
+                body: b"<?xml version=\"1.0\"?><d:error xmlns:d=\"DAV:\" xmlns:s=\"http://ns.jianguoyun.com\"><s:exception>BlockedTemporarily</s:exception><s:message>Too many requests are received recently</s:message></d:error>".to_vec(),
+            }]),
+            seen: Mutex::new(vec![]),
+        });
+        let error = client(mock).probe().unwrap_err();
+        assert_eq!(error.kind, WebDavErrorKind::RateLimited);
+        assert_eq!(error.status, Some(503));
+        assert_eq!(error.retry_after, Some(Duration::from_secs(42)));
     }
 
     #[test]

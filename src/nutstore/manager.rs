@@ -5,6 +5,7 @@ use crate::nutstore::client::NutstoreClient;
 use crate::nutstore::credentials;
 use crate::nutstore::engine::{InitialChoice, InitialPolicy, SyncEngine, SyncOptions, SyncOutcome};
 use crate::nutstore::state::{Config, StateStore, clean_remote_root, normalize_server};
+use crate::nutstore::api::{WebDavError, WebDavErrorKind};
 use crate::settings::tr;
 use gpui::{App, AppContext as _, AsyncApp};
 use std::cell::RefCell;
@@ -18,6 +19,36 @@ const POLL_IDLE: Duration = Duration::from_secs(15 * 60);
 const MIN_AUTO_GAP: Duration = Duration::from_secs(120);
 const SAVE_DELAY: Duration = Duration::from_secs(120);
 const RETRY_DELAY: Duration = Duration::from_secs(5 * 60);
+const RATE_LIMIT_DELAY: Duration = Duration::from_secs(30 * 60);
+
+/// A failed sync, with the rate-limit information WebDAV errors carry.
+struct SyncFailure {
+    message: String,
+    rate_limited: bool,
+    retry_after: Option<Duration>,
+}
+
+impl SyncFailure {
+    fn message(message: impl Into<String>) -> Self {
+        Self { message: message.into(), rate_limited: false, retry_after: None }
+    }
+    fn from_anyhow(error: anyhow::Error) -> Self {
+        match error.downcast_ref::<WebDavError>() {
+            Some(e) => Self { message: e.message.clone(), rate_limited: e.kind == WebDavErrorKind::RateLimited, retry_after: e.retry_after },
+            None => Self::message(error.to_string()),
+        }
+    }
+    /// The pause and message for Nutstore's "too many requests" block.
+    fn limited(&self) -> Option<(String, Duration)> {
+        self.rate_limited.then(|| (
+            tr(
+                "坚果云暂时限制了访问频率（请求过多），同步已暂停，请稍后再试",
+                "Nutstore is temporarily limiting requests; sync is paused. Try again later",
+            ).to_string(),
+            self.retry_after.unwrap_or(RATE_LIMIT_DELAY),
+        ))
+    }
+}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SyncSummary {
@@ -257,23 +288,23 @@ fn start_connect(root_key: &str, config: Config, password: Option<String>, cx: &
     .detach();
 }
 
-fn connect_and_sync(options: SyncOptions, config: Config, password: String, policy: InitialPolicy) -> Result<(SyncOutcome, Config), String> {
-    let client = NutstoreClient::connect_or_create(&config, &password)?;
+fn connect_and_sync(options: SyncOptions, config: Config, password: String, policy: InitialPolicy) -> Result<(SyncOutcome, Config), SyncFailure> {
+    let client = NutstoreClient::connect_or_create(&config, &password).map_err(SyncFailure::message)?;
     let root_key = options.cache_dir.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string();
-    credentials::save(&root_key, &options.cache_dir, &password)?;
+    credentials::save(&root_key, &options.cache_dir, &password).map_err(SyncFailure::message)?;
     let store = StateStore::new(&options.cache_dir);
-    let old = store.load().map_err(|e| e.to_string())?;
+    let old = store.load().map_err(|e| SyncFailure::message(e.to_string()))?;
     if !old.state.server.is_empty()
         && (old.state.server != config.server || old.state.username != config.username || old.state.remote_root != config.remote_root) {
         let _ = std::fs::rename(store.state_path(), store.dir().join(format!("state.json.reset-{}", crate::time::now_ms())));
     }
-    store.save_config(&config).map_err(|e| e.to_string())?;
-    let mut engine = SyncEngine::open(SyncOptions { config: config.clone(), ..options }).map_err(|e| e.to_string())?;
-    let outcome = engine.sync(&client, policy).map_err(|e| e.to_string())?;
+    store.save_config(&config).map_err(|e| SyncFailure::message(e.to_string()))?;
+    let mut engine = SyncEngine::open(SyncOptions { config: config.clone(), ..options }).map_err(|e| SyncFailure::message(e.to_string()))?;
+    let outcome = engine.sync(&client, policy).map_err(SyncFailure::from_anyhow)?;
     Ok((outcome, config))
 }
 
-fn finish_connect(root_key: &str, epoch: u64, result: Result<(SyncOutcome, Config), String>, cx: &mut App) {
+fn finish_connect(root_key: &str, epoch: u64, result: Result<(SyncOutcome, Config), SyncFailure>, cx: &mut App) {
     let stale = with_manager(|m| {
         if m.epoch == epoch { return false }
         if let Some(slot) = m.roots.get_mut(root_key) { slot.busy = false; }
@@ -292,12 +323,17 @@ fn finish_connect(root_key: &str, epoch: u64, result: Result<(SyncOutcome, Confi
                 apply_outcome(slot, outcome);
             });
         }
-        Err(error) => {
+        Err(failure) => {
             with_manager(|m| {
                 let Some(slot) = m.roots.get_mut(root_key) else { return };
                 slot.busy = false;
-                slot.status.phase = Phase::Error(readable(error));
-                slot.retry_after = Some(Instant::now() + RETRY_DELAY);
+                if let Some((message, delay)) = failure.limited() {
+                    slot.status.phase = Phase::Error(message);
+                    slot.retry_after = Some(Instant::now() + delay);
+                } else {
+                    slot.status.phase = Phase::Error(readable(failure.message));
+                    slot.retry_after = Some(Instant::now() + RETRY_DELAY);
+                }
             });
         }
     }
@@ -350,14 +386,14 @@ fn start_sync(root_key: &str, cx: &mut App) {
     .detach();
 }
 
-fn run_sync(options: SyncOptions, password: String, policy: InitialPolicy) -> Result<(SyncOutcome, String), String> {
-    let client = NutstoreClient::connect(&options.config, &password)?;
-    let mut engine = SyncEngine::open(options).map_err(|e| e.to_string())?;
-    let outcome = engine.sync(&client, policy).map_err(|e| e.to_string())?;
+fn run_sync(options: SyncOptions, password: String, policy: InitialPolicy) -> Result<(SyncOutcome, String), SyncFailure> {
+    let client = NutstoreClient::connect(&options.config, &password).map_err(SyncFailure::message)?;
+    let mut engine = SyncEngine::open(options).map_err(|e| SyncFailure::message(e.to_string()))?;
+    let outcome = engine.sync(&client, policy).map_err(SyncFailure::from_anyhow)?;
     Ok((outcome, engine.state().username.clone()))
 }
 
-fn finish_sync(root_key: &str, epoch: u64, result: Result<(SyncOutcome, String), String>, cx: &mut App) {
+fn finish_sync(root_key: &str, epoch: u64, result: Result<(SyncOutcome, String), SyncFailure>, cx: &mut App) {
     let mut changed = None;
     with_manager(|m| {
         if m.epoch != epoch {
@@ -377,8 +413,13 @@ fn finish_sync(root_key: &str, epoch: u64, result: Result<(SyncOutcome, String),
                     apply_outcome(slot, outcome);
                 }
             }
-            Err(error) => {
-                let error = readable(error);
+            Err(failure) => {
+                if let Some((message, delay)) = failure.limited() {
+                    slot.status.phase = Phase::Error(message);
+                    slot.retry_after = Some(Instant::now() + delay);
+                    return
+                }
+                let error = readable(failure.message);
                 if auth_lost(&error) {
                     m.epoch = m.epoch.wrapping_add(1);
                     slot.status.phase = Phase::SignedOut;

@@ -3,7 +3,8 @@
 
 use std::io::Write;
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 #[derive(Clone)]
 pub struct HttpRequest {
@@ -68,6 +69,7 @@ pub struct CurlTransport {
 
 impl HttpTransport for CurlTransport {
     fn send(&self, request: &HttpRequest) -> Result<HttpResponse, String> {
+        pace();
         let tag = uuid::Uuid::new_v4();
         let dir = std::env::temp_dir();
         let request_body = dir.join(format!("quiet-md-http-{tag}.request"));
@@ -86,7 +88,7 @@ impl HttpTransport for CurlTransport {
         // `curl_command` carries the platform proxy setup. Its `-fsSL` would
         // hide error bodies, so replace it with `-sS -L`.
         let base = crate::update::curl_command(self.allow_http);
-        let mut command = std::process::Command::new(base.get_program());
+        let mut command = crate::update::command(base.get_program());
         for arg in base.get_args() {
             let text = arg.to_string_lossy();
             if text != "-fsSL" { command.arg(arg); }
@@ -130,6 +132,22 @@ impl HttpTransport for CurlTransport {
         cleanup();
         Ok(HttpResponse { status: code, headers, body })
     }
+}
+
+/// Nutstore allows about 600 WebDAV requests per 30 minutes (1500 on paid
+/// plans). Space requests apart so a large first sync cannot use up the window
+/// in one burst and get the account blocked (`BlockedTemporarily`).
+const MIN_REQUEST_GAP: Duration = Duration::from_secs(4);
+
+fn pace() {
+    if cfg!(test) { return }
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(at) = *last {
+        let wait = MIN_REQUEST_GAP.saturating_sub(at.elapsed());
+        if !wait.is_zero() { std::thread::sleep(wait); }
+    }
+    *last = Some(Instant::now());
 }
 
 fn parse_headers(text: &str) -> Vec<(String, String)> {

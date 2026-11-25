@@ -59,7 +59,12 @@ try {
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $signScript -VerifyOnly -FilePath $installer -CertificateThumbprint $CertificateThumbprint -TimestampUrl $TimestampUrl -SignTool $SignTool
         if ($LASTEXITCODE -ne 0) { throw 'Installer signature verification failed' }
     }
-    $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+    # Not Get-FileHash: a Visual Studio developer shell can leave PowerShell
+    # unable to autoload Microsoft.PowerShell.Utility.
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($installer)
+    try { $hash = [System.BitConverter]::ToString($sha256.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+    finally { $stream.Dispose(); $sha256.Dispose() }
     [System.IO.File]::WriteAllText("$installer.sha256", "$hash  $name`n", [System.Text.Encoding]::ASCII)
     Copy-Item $installer, "$installer.sha256" $output -Force
     # Debug symbols for the logged panic addresses; kept, not published.
