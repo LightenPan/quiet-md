@@ -39,7 +39,7 @@ const BASE: &str = "https://download.quiet.md/latest";
 /// Where every package lives (`v<version>/<name>`); a manifest naming any
 /// other host is refused.
 const PACKAGES: &str = "https://download.quiet.md/";
-const KEY: &str = match option_env!("QUIET_MD_UPDATE_PUBKEY") { Some(k) => k, None => include_str!("../packaging/update-key.pub") };
+const KEY: &str = match option_env!("QUIET_MD_UPDATE_PUBKEY") { Some(k) => k, None => include_str!("../../packaging/update-key.pub") };
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct Manifest {

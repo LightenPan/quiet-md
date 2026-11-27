@@ -348,7 +348,7 @@ mod disk {
 
 #[cfg(target_os = "macos")]
 mod backend {
-    use crate::printing::native::{close, ns_string, offscreen};
+    use crate::desktop::printing::native::{close, ns_string, offscreen};
     use gpui::AsyncApp;
     use objc::declare::ClassDecl;
     use objc::runtime::{Class, Object, Sel};
@@ -420,7 +420,7 @@ mod backend {
 
 #[cfg(target_os = "windows")]
 mod backend {
-    use crate::printing::webview2::{controller, file_url};
+    use crate::desktop::printing::webview2::{controller, file_url};
     use gpui::AsyncApp;
     use std::time::Duration;
     use webview2_com::Microsoft::Web::WebView2::Win32::*;

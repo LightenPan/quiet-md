@@ -87,8 +87,8 @@ impl HttpTransport for CurlTransport {
 
         // `curl_command` carries the platform proxy setup. Its `-fsSL` would
         // hide error bodies, so replace it with `-sS -L`.
-        let base = crate::update::curl_command(self.allow_http);
-        let mut command = crate::update::command(base.get_program());
+        let base = crate::desktop::update::curl_command(self.allow_http);
+        let mut command = crate::desktop::update::command(base.get_program());
         for arg in base.get_args() {
             let text = arg.to_string_lossy();
             if text != "-fsSL" { command.arg(arg); }

@@ -131,7 +131,7 @@ Whiteboard and history modules in core:
 | `main.rs` | Entry point, `FDL_SCRIPT` mode (devtools builds only), `--self-test` and core module re-exports |
 | `guides.rs` | Seeds an empty library with the bundled Getting Started guides once |
 | `app.rs` | `Workspace`, the two-pane window, open/create/save/delete actions, save state and reminder scheduling |
-| `html.rs` / `printing.rs` / `transfer.rs` | HTML/PDF export, printing and import/export UI |
+| `html.rs` / `desktop/printing.rs` / `transfer.rs` | HTML/PDF export, printing and import/export UI |
 | `clipboard.rs` | System clipboard HTML and the simulated clipboard in script mode |
 | `sidebar.rs` / `tree.rs` / `collate.rs` | Sidebar and document tree, including child pages (a folder's own document, see FORMAT.md and core's `subdocs.rs`) and Move to; sibling name order puts numbers first and sorts Han characters by pinyin |
 | `home.rs` / `trash.rs` | Home and trash |
@@ -139,7 +139,7 @@ Whiteboard and history modules in core:
 | `docmenu.rs` / `docinfo.rs` / `modes.rs` | More menu, document information, edit/read mode switch and shortcut panel |
 | `theme.rs` | `craft` scale, semantic `Theme::*` colors, named display colors, `shadow_*`, type scale and note panel dimensions |
 | `ui.rs` / `input.rs` | Shared menu shells and rows, white pill buttons, hints, toasts and single-line input |
-| `tray.rs` | Windows notification-area icon and menu; 最小化到任务栏 hides the main window without quitting |
+| `desktop/tray.rs` | Windows notification-area icon and menu; 最小化到任务栏 hides the main window without quitting |
 | `highlight.rs` | Code highlighting |
 | `mermaid.rs` | Mermaid code blocks drawn as diagrams: bundled mermaid.js in an off-screen web view (macOS, Windows), SVG cached by source and theme |
 | `assets.rs` | Embedded icons, fonts and cover gallery |
@@ -151,6 +151,7 @@ Whiteboard and history modules in core:
 | `devtools.rs` | Script driver compiled with `--features devtools`. See tools/harness/README.md. |
 | `selftest.rs` | Release self-test: fixed end-to-end scenarios that shipped builds run with `--self-test`. See tools/harness/README.md. |
 | `history.rs` | Version drawer grouped by day, in-place read-only preview, change highlighting, naming, restore, save a copy and delete |
+| `desktop/` | Platform code the mobile ports leave out ([design](design/mobile.md) M1/M10): the quick-note window and its global hotkeys, in-app updates (mobile ships through the stores), printing, the Windows tray icon and the macOS native sidebar material. Modules are cfg-gated inside themselves, so the crate still builds everywhere. `mobile/` is the mobile seam: input-method and soft-keyboard adaptation, touch selection, safe areas and calls into the thin native shell. |
 | `board/` view | `BoardView` replaces the document in the note area. `mod.rs` owns the scene, store and commit loop, `canvas.rs` dispatches pointers, `keys.rs` handles shortcuts, `run.rs` / `action.rs` implement actions and clipboard, `text_editor.rs` edits text and `frame_name.rs` renames frames. `fonts.rs` registers Excalidraw's fonts; `font_hint.rs` shows the CJK one downloading (`font_downloads.rs`, docs/FONTS.md). `editor/board.rs` handles thumbnails and entering/leaving the board. |
 | `board/tools/` | Tool state machines: `selection` (drag, handles and marquee), `shape`, `linear`, `freedraw`, `text`, `eraser`, `lasso`, `image`, `crop`, `flowchart` |
 | `board/` rendering | GPUI backend in `render.rs` and `render_geom.rs` (CPU clipping and image resampling), vello_cpu in `render_vello.rs`, overlays for selection bounds, handles and snap lines in `overlay.rs` |

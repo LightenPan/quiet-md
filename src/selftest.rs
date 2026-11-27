@@ -416,29 +416,29 @@ impl Run {
     /// the package downloads, and the release key turns down its signature
     /// (made with a throwaway key, which does verify it).
     async fn update(&mut self) -> Step {
-        let platform = crate::update::platform().ok_or("no update platform")?;
-        let name = crate::update::package_name(UPDATE_VERSION, platform);
+        let platform = crate::desktop::update::platform().ok_or("no update platform")?;
+        let name = crate::desktop::update::package_name(UPDATE_VERSION, platform);
         let signature = update_signature(&name).ok_or("no test signature for this platform")?;
         let url = serve_update(&name, &signature).map_err(|e| format!("local server: {e}"))?;
         let dir = self.dir.join("updates");
-        crate::update::redirect(url, dir.clone());
-        self.cx.update(|cx| crate::update::check(true, cx));
-        let mut state = crate::update::State::Idle;
-        self.until("the manifest", 20, |_, _, cx| { state = crate::update::state(cx); !matches!(state, crate::update::State::Checking | crate::update::State::Idle) }).await?;
+        crate::desktop::update::redirect(url, dir.clone());
+        self.cx.update(|cx| crate::desktop::update::check(true, cx));
+        let mut state = crate::desktop::update::State::Idle;
+        self.until("the manifest", 20, |_, _, cx| { state = crate::desktop::update::state(cx); !matches!(state, crate::desktop::update::State::Checking | crate::desktop::update::State::Idle) }).await?;
         match &state {
-            crate::update::State::Available(m) if m.version == UPDATE_VERSION => {}
+            crate::desktop::update::State::Available(m) if m.version == UPDATE_VERSION => {}
             s => return Err(format!("check ended in {s:?}")),
         }
-        self.cx.update(crate::update::download);
-        self.until("the download", 30, |_, _, cx| { state = crate::update::state(cx); !matches!(state, crate::update::State::Downloading(_) | crate::update::State::Available(_)) }).await?;
+        self.cx.update(crate::desktop::update::download);
+        self.until("the download", 30, |_, _, cx| { state = crate::desktop::update::state(cx); !matches!(state, crate::desktop::update::State::Downloading(_) | crate::desktop::update::State::Available(_)) }).await?;
         match &state {
-            crate::update::State::Failed(e) if e.ends_with("signature") => {}
+            crate::desktop::update::State::Failed(e) if e.ends_with("signature") => {}
             s => return Err(format!("a package signed by another key ended in {s:?}")),
         }
         let bytes = std::fs::read(dir.join(format!("{name}.part"))).map_err(|e| format!("downloaded package: {e}"))?;
         if bytes != UPDATE_PACKAGE { return Err("the downloaded package differs from the served one".into()) }
         let key = minisign_verify::PublicKey::from_base64(UPDATE_KEY).map_err(|e| e.to_string())?;
-        if !crate::update::signed(&bytes, &signature, &name, &key) { return Err("the test key does not verify the package".into()) }
+        if !crate::desktop::update::signed(&bytes, &signature, &name, &key) { return Err("the test key does not verify the package".into()) }
         Ok(())
     }
 
@@ -489,7 +489,7 @@ fn serve_update(name: &str, signature: &str) -> std::io::Result<String> {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let base = format!("http://{}", listener.local_addr()?);
-    let platform = crate::update::platform().unwrap_or_default();
+    let platform = crate::desktop::update::platform().unwrap_or_default();
     let manifest = serde_json::json!({ "version": UPDATE_VERSION, "url": format!("{base}/v{UPDATE_VERSION}/{name}"), "size": UPDATE_PACKAGE.len(), "signature": signature }).to_string();
     let files = [(format!("/update-{platform}.json"), manifest.into_bytes()), (format!("/v{UPDATE_VERSION}/{name}"), UPDATE_PACKAGE.to_vec())];
     std::thread::spawn(move || {

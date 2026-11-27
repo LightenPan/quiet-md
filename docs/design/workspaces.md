@@ -299,7 +299,7 @@ Obsidian Vault      ← 用户打开的 Obsidian 库
 - `src/local_folders.rs`：`open_folder_dialog` / `mount_dirs` 改成往工作区加根，文件改名或并进 `folders.rs`；加「新建文件夹…」。
 - `src/transfer.rs`：拖动的目标和来源不在同一个根时走「复制」（现有的导入路径），提示「已复制」。
 - `src/trash.rs`：回收站列表汇总各根，每个根用自己的 `.quiet/trash/`；本机文件夹原来走系统废纸篓（`system_trash.rs`）的那条路径不再用于根，只留给单个本机文件。
-- `src/quick_note.rs`：目标根按 2.8 的规则选。
+- `src/desktop/quick_note.rs`：目标根按 2.8 的规则选。
 - `src/search.rs`、快速切换：消费汇总后的 `entries`，行里加根名。
 - `src/onboarding.rs`：第一页「新建」和「打开已有的」并列，可以跳过；第二页发现的文件夹默认「打开」。
 - `src/guides.rs`：调用点改到「新建文件夹」和「帮助 › 开始指南」。

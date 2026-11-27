@@ -265,7 +265,7 @@ impl Workspace {
                     })),
             ))
             .child(divider())
-            .when(crate::printing::SUPPORTED, |d| d.child(
+            .when(crate::desktop::printing::SUPPORTED, |d| d.child(
                 menu_item("dm-print", "printer", crate::settings::text("打印"), false, false)
                     .on_hover(hover_sub(None))
                     .on_click(cx.listener(move |w, _, window, cx| w.print_doc(&print_id, window, cx))),
@@ -354,7 +354,7 @@ impl Workspace {
                         .px(px(5.))
                         .py(px(PAD))
                         .child(recorder())
-                        .when(crate::printing::SUPPORTED, |d| d.child(sub_item("dm-pdf", "PDF").on_click(cx.listener(move |w, _, window, cx| w.export_pdf(&pdf, window, cx)))))
+                        .when(crate::desktop::printing::SUPPORTED, |d| d.child(sub_item("dm-pdf", "PDF").on_click(cx.listener(move |w, _, window, cx| w.export_pdf(&pdf, window, cx)))))
                         .child(sub_item("dm-md", "Markdown").on_click(cx.listener(move |w, _, _, cx| w.open_export_md(&id, cx))))
                         .into_any_element()
                 },

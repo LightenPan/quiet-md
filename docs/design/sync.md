@@ -126,7 +126,7 @@
 
 | 方案 | 用户要做什么 | 包体积 | 远端 | 限制 |
 |---|---|---|---|---|
-| **a. GitHub REST API（Git Data API）** | 点「登录 GitHub」，选或新建一个仓库 | **几乎为 0**：HTTP 走应用已经在用的系统 `curl`（`update.rs`、字体下载都是这么做的），JSON、base64、解压（`miniz_oxide`）都已有，只多我们自己的一两千行代码 | 只 GitHub（GitHub Enterprise 换个 API 地址即可） | 登录用户每小时 5000 次请求；不支持 LFS；单文件 100MB 上限（和 GitHub 本身一样） |
+| **a. GitHub REST API（Git Data API）** | 点「登录 GitHub」，选或新建一个仓库 | **几乎为 0**：HTTP 走应用已经在用的系统 `curl`（`desktop/update.rs`、字体下载都是这么做的），JSON、base64、解压（`miniz_oxide`）都已有，只多我们自己的一两千行代码 | 只 GitHub（GitHub Enterprise 换个 API 地址即可） | 登录用户每小时 5000 次请求；不支持 LFS；单文件 100MB 上限（和 GitHub 本身一样） |
 | b. gix 只开最小特性，走 HTTPS | 同 a，也要先 OAuth 登录拿 token | **实测 +8.2 MB**：gix 0.90 最小特性（HTTPS 传输、`rustls`、检出、状态、提交），release + LTO + strip，arm64，空程序 0.35 MB → 8.54 MB；现在应用本体 39 MB。还会引入 rustls/ring，本机交叉编译 Windows 已知会卡在 ring | 任意 git 远端 | **gix 0.90 还不能 push**（源码里 push 只有 `push.default` 配置的解析），推送得另想办法，第一期不可行 |
 | c. 调用系统 git | 自己装 git，配好 SSH 或凭据 | 0 | 任意 | Windows 默认没装 git，Mac 要先装命令行工具；iOS 用不了 |
 

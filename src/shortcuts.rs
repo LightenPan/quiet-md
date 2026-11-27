@@ -357,7 +357,7 @@ fn change(id: &str, key: Option<String>, cx: &mut App) -> anyhow::Result<()> {
     // Empty means explicitly unbound, rather than falling back to the default.
     if key == default_key(s, id) { custom.remove(id); } else { custom.insert(id.into(), key.clone()); }
     let old = s.custom.get(id).cloned().unwrap_or_else(|| default_key(s, id));
-    let set = |key: &str, cx: &mut App| match id { "global" => crate::quick_note::set_hotkey(key, cx), LAST_ID => crate::quick_note::set_last_hotkey(key, cx), _ => Ok(()) };
+    let set = |key: &str, cx: &mut App| match id { "global" => crate::desktop::quick_note::set_hotkey(key, cx), LAST_ID => crate::desktop::quick_note::set_last_hotkey(key, cx), _ => Ok(()) };
     if crate::settings::prefs().quick_hotkey { set(&key, cx)?; }
     if let Err(e) = write(&custom) { if crate::settings::prefs().quick_hotkey { let _ = set(&old, cx); } return Err(e); }
     cx.global_mut::<Shortcuts>().custom = custom;
@@ -379,7 +379,7 @@ impl Workspace {
         self.shortcut_strokes.clear();
         if self.shortcut_recording.take().is_some() {
             rebuild(cx);
-            if crate::settings::prefs().quick_hotkey { crate::quick_note::register(cx); }
+            if crate::settings::prefs().quick_hotkey { crate::desktop::quick_note::register(cx); }
         }
     }
 
@@ -387,7 +387,7 @@ impl Workspace {
         self.cancel_shortcut_recording(cx);
         self.shortcut_recording = Some(id.to_string());
         self.shortcut_error = None;
-        crate::quick_note::suspend_hotkey();
+        crate::desktop::quick_note::suspend_hotkey();
         window.focus(&self.focus, cx);
         cx.clear_key_bindings();
         cx.notify();
@@ -514,7 +514,7 @@ impl Workspace {
         let last = key_of(cx, LAST_ID);
         let last_rec = self.shortcut_recording.as_deref() == Some(LAST_ID);
         let global_err = self.shortcut_error.as_ref().filter(|(id, _)| is_global(id)).map(|(_, e)| e.clone())
-            .or_else(|| on.then(crate::quick_note::hotkey_error).flatten());
+            .or_else(|| on.then(crate::desktop::quick_note::hotkey_error).flatten());
         let matches = |zh: &str, en: &str, key: &str| q.is_empty() || [zh.to_lowercase(), en.to_lowercase(), key.to_lowercase()].iter().any(|s| s.contains(&q));
         let show_global = cfg!(target_os = "macos") && (matches("快速新建笔记", "Quick note", &pretty(&global)) || matches("打开上次使用的文档", "Open last used document", &pretty(&last)));
         let empty = empty && !show_global;

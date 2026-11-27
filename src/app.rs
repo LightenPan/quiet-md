@@ -68,7 +68,7 @@ fn menu_bar(markdown: bool) -> Vec<Menu> {
             name: tr("文件", "File").into(),
             items: vec![
                 MenuItem::action(tr("新建文档", "New Document"), NewDoc),
-                MenuItem::action(tr("新建笔记窗口", "New Note Window"), crate::quick_note::QuickNew),
+                MenuItem::action(tr("新建笔记窗口", "New Note Window"), crate::desktop::quick_note::QuickNew),
                 MenuItem::action(tr("打开 Markdown 文件…", "Open Markdown File…"), OpenFile),
                 MenuItem::action(tr("打开文件夹…", "Open Folder…"), OpenFolder),
                 MenuItem::action(tr("导入为文档…", "Import as Document…"), ImportDoc),
@@ -175,7 +175,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-shift-z", crate::editor::keymap::Redo, Some("Workspace")),
         KeyBinding::new("cmd-y", crate::editor::keymap::Redo, Some("Workspace")),
         KeyBinding::new("cmd-n", NewDoc, None),
-        KeyBinding::new("cmd-shift-n", crate::quick_note::QuickNew, None),
+        KeyBinding::new("cmd-shift-n", crate::desktop::quick_note::QuickNew, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
         // For trying the first-launch pages; not listed in Settings › Shortcuts.
         KeyBinding::new("cmd-alt-shift-o", ReplayOnboarding, None),
@@ -252,14 +252,14 @@ impl Workspace {
     /// Whether the window may close now. On Windows a main window asks how to
     /// close first: 最小化到任务栏 / 最小化 / 退出.
     pub(crate) fn request_close(&mut self, cx: &mut Context<Self>) -> bool {
-        if crate::tray::available() && !self.quick_note && self.onboarding.is_none() {
+        if crate::desktop::tray::available() && !self.quick_note && self.onboarding.is_none() {
             if self.confirm.is_none() {
                 self.confirm = Some(Confirm::CloseWindow);
                 cx.notify();
             }
             return false;
         }
-        crate::quick_note::persist(cx);
+        crate::desktop::quick_note::persist(cx);
         self.cancel_shortcut_recording(cx);
         self.flush_view_state();
         self.save_before(cx, |_, window, _| window.remove_window())
@@ -268,7 +268,7 @@ impl Workspace {
     pub(crate) fn choose_close(&mut self, choice: CloseChoice, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.confirm, Some(Confirm::CloseWindow)) { return }
         self.confirm = None;
-        crate::quick_note::persist(cx);
+        crate::desktop::quick_note::persist(cx);
         if choice == CloseChoice::Exit {
             cx.defer(quit);
             cx.notify();
@@ -288,11 +288,11 @@ impl Workspace {
             CloseChoice::Tray => {
                 let show = crate::settings::tr("显示 Quiet.md", "Show Quiet.md");
                 let quit = crate::settings::tr("退出", "Exit");
-                if let Err(e) = crate::tray::hide(window, show, quit) {
+                if let Err(e) = crate::desktop::tray::hide(window, show, quit) {
                     self.show_toast_kind(ToastKind::Error, &crate::localized_format!("无法最小化到任务栏：{}", "Could not minimize to the taskbar: {}", crate::settings::diagnostic(&e)), cx);
                     window.minimize_window();
                 } else {
-                    crate::tray::start_poll(cx);
+                    crate::desktop::tray::start_poll(cx);
                 }
             }
             CloseChoice::Minimize => window.minimize_window(),
@@ -409,7 +409,7 @@ pub struct Workspace {
     pub font_anchors: std::rc::Rc<std::cell::RefCell<std::collections::HashMap<&'static str, Bounds<Pixels>>>>,
     /// 快捷键's filter field.
     pub settings_filter: Entity<TextField>,
-    native_sidebar: crate::native_header::NativeSidebar,
+    native_sidebar: crate::desktop::native_header::NativeSidebar,
     pub store: SharedStore,
     pub entries: Vec<Entry>,
     pub current: Option<String>,
@@ -583,18 +583,18 @@ impl Workspace {
         });
         let subs = vec![
             cx.subscribe(&settings_filter, |_, _, ev: &TextFieldEvent, cx| if matches!(ev, TextFieldEvent::Changed) { cx.notify(); }),
-            cx.observe_window_bounds(window, |this, window, cx| crate::quick_note::remember(window, this.quick_note, cx)),
+            cx.observe_window_bounds(window, |this, window, cx| crate::desktop::quick_note::remember(window, this.quick_note, cx)),
             // The system switched between light and dark (or the app's own look changed).
             cx.observe_window_appearance(window, |this, _, cx| if crate::settings::sync_dark(cx) { crate::settings::refresh_all(this, cx); }),
             cx.observe_window_activation(window, |this, window, cx| {
                 if window.is_window_active() {
-                    if let Some(id) = &this.current { crate::quick_note::used(id, cx); }
+                    if let Some(id) = &this.current { crate::desktop::quick_note::used(id, cx); }
                     if !this.store.file_task_busy() { this.entries = this.store.list(); this.sort(); this.refresh_markdown(Some(window.window_handle().window_id()), cx); }
                     #[cfg(not(target_family = "wasm"))]
                     cx.defer(|cx| {
                         crate::nutstore::manager::on_window_activated(cx);
                     });
-                    crate::update::check_if_stale(cx); cx.notify();
+                    crate::desktop::update::check_if_stale(cx); cx.notify();
                 }
                 else if !this.store.file_task_busy() { this.cancel_home_drag(cx); this.end_folder_drag(true, cx); this.cancel_shortcut_recording(cx); this.flush(cx); }
             }),
@@ -619,7 +619,7 @@ impl Workspace {
             // Last resort (the system logging out): ⌘Q and the close button
             // go through `save_before` and ask when the save fails.
             cx.on_app_quit(|this, cx| {
-                crate::quick_note::persist(cx);
+                crate::desktop::quick_note::persist(cx);
                 this.flush_view_state();
                 if !this.store.file_task_busy() && !this.flush(cx) && let Some(ed) = &this.editor
                     && let Err(error) = this.store.recover_later(&ed.read(cx).core.doc) {
@@ -965,7 +965,7 @@ impl Workspace {
         if self.store.set_active(id) { cx.defer(crate::settings::root_switched); }
         // Web images pasted earlier whose download landed after it closed (#220).
         if let Some(e) = self.editor.clone() { e.update(cx, |e, cx| e.adopt_remote(cx)); }
-        crate::quick_note::used(id, cx);
+        crate::desktop::quick_note::used(id, cx);
         self.reveal_in_tree(id);
         self.sync_sub_pages(cx);
         self.status = SaveStatus::Idle;
@@ -2028,7 +2028,7 @@ impl Render for Workspace {
         let pref_menu = self.render_pref_menu(cx);
         let font_menu = self.render_font_menu(cx);
         let toast = self.render_toast(window);
-        let forced_update = crate::update::prompt(window, cx);
+        let forced_update = crate::desktop::update::prompt(window, cx);
         let mode_menu = self.render_mode_menu(cx);
         let main = match self.view {
             View::Doc => div()
@@ -2109,7 +2109,7 @@ impl Render for Workspace {
             .on_action(cx.listener(|w, _: &OpenSettings, _, cx| w.show_view(View::Settings, cx)))
             .on_action(cx.listener(|w, _: &ReplayOnboarding, window, cx| w.replay_onboarding(window, cx)))
             .on_action(cx.listener(|w, _: &OpenAbout, _, cx| w.open_settings(crate::settings::Page::About, cx)))
-            .on_action(cx.listener(|w, _: &CheckForUpdates, _, cx| { w.open_settings(crate::settings::Page::About, cx); crate::update::check(true, cx); }))
+            .on_action(cx.listener(|w, _: &CheckForUpdates, _, cx| { w.open_settings(crate::settings::Page::About, cx); crate::desktop::update::check(true, cx); }))
             .on_action(cx.listener(|w, _: &GoHome, _, cx| w.show_view(View::Home, cx)))
             .on_action(cx.listener(|w, _: &NewDoc, window, cx| w.new_doc(window, cx)))
             .on_action(cx.listener(|w, _: &ImportDoc, window, cx| w.open_import(window, cx)))
@@ -2158,8 +2158,8 @@ impl Render for Workspace {
             .capture_key_down(cx.listener(|w, ev: &KeyDownEvent, window, cx| {
                 let _ = &window;
                 // A required update waits for 立即重启更新 (↩): no key reaches the window beneath.
-                if crate::update::blocking(cx) {
-                    if ev.keystroke.key == "enter" { crate::update::install(cx); }
+                if crate::desktop::update::blocking(cx) {
+                    if ev.keystroke.key == "enter" { crate::desktop::update::install(cx); }
                     cx.stop_propagation();
                     return;
                 }

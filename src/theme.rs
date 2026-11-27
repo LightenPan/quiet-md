@@ -415,7 +415,7 @@ impl Theme {
         // 外观 › 窗口背景: an opaque window keeps a moving desktop from showing
         // through the sidebar (which some people find distracting).
         if crate::settings::prefs().opaque_window || fullscreen() { return ca(craft::WINDOW, 1.) }
-        if crate::native_header::supported() { ca(craft::WINDOW, 0.) } else if crate::theme::glass() { ca(craft::WINDOW, 0.84) } else { ca(craft::WINDOW, 1.) }
+        if crate::desktop::native_header::supported() { ca(craft::WINDOW, 0.) } else if crate::theme::glass() { ca(craft::WINDOW, 0.84) } else { ca(craft::WINDOW, 1.) }
     }
 
     /// Sidebar row label: text at 85%.

@@ -14,7 +14,6 @@ mod board;
 #[global_allocator]
 static ALLOC: big_alloc::Alloc = big_alloc::Alloc;
 mod shared_store;
-mod quick_note;
 mod assets;
 mod changelog;
 mod collate;
@@ -34,6 +33,7 @@ mod devtools {
 }
 mod docinfo;
 mod docmenu;
+mod desktop;
 mod editor;
 mod highlight;
 mod history;
@@ -42,14 +42,9 @@ mod html;
 mod input;
 mod logging;
 mod modes;
+mod mobile;
 mod onboarding;
-#[cfg(target_os = "macos")]
-mod native_header;
-#[cfg(not(target_os = "macos"))]
-#[path = "native_header_fallback.rs"]
-mod native_header;
 mod mermaid;
-mod printing;
 mod search;
 #[cfg(not(target_family = "wasm"))]
 mod selftest;
@@ -89,12 +84,10 @@ mod editor_theme;
 #[allow(dead_code, unused_imports)]
 mod editor_ui;
 mod theme;
-mod tray;
 mod transfer;
 mod trash;
 mod tree;
 mod ui;
-mod update;
 #[cfg(target_family = "wasm")]
 mod web;
 
@@ -134,7 +127,7 @@ fn set_app_icon() {
 pub(crate) fn main_window_options(scripted: bool, at: Option<Bounds<Pixels>>, cx: &mut App) -> WindowOptions {
     // Scripted dev runs must not steal keyboard focus from whatever the
     // user is typing into.
-    let (display_id, mut bounds) = match at { Some(at) => (None, at), None => quick_note::main_window_bounds(cx) };
+    let (display_id, mut bounds) = match at { Some(at) => (None, at), None => desktop::quick_note::main_window_bounds(cx) };
     // A half-point origin (an odd leftover height) makes AppKit grow the
     // window by a point when it aligns the frame to pixels.
     bounds.origin = bounds.origin.map(|v| v.round());
@@ -187,9 +180,9 @@ pub(crate) fn start(existed: bool, scripted: bool, into: Option<&mut Window>, in
     // The root in front brings its own look (W21).
     settings::root_switched(cx);
     // The web build has no global shortcut to register.
-    if !scripted && !cfg!(target_family = "wasm") { quick_note::install(cx); }
+    if !scripted && !cfg!(target_family = "wasm") { desktop::quick_note::install(cx); }
     app::set_menus(cx);
-    update::init(cx);
+    desktop::update::init(cx);
     #[cfg(not(target_family = "wasm"))]
     nutstore::manager::init(cx);
     let took = into.map(|window| window.replace_root(cx, app::Workspace::new));

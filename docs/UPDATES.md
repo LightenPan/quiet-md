@@ -1,6 +1,6 @@
 # Updates and forced updates
 
-`src/update.rs` keeps an installed copy current; fonts fetched on demand are in [Downloadable fonts](FONTS.md). Everything it trusts is signed with the release minisign key (`packaging/update-key.pub`; the secret key stays with the maintainer).
+`src/desktop/update.rs` keeps an installed copy current; fonts fetched on demand are in [Downloadable fonts](FONTS.md). Everything it trusts is signed with the release minisign key (`packaging/update-key.pub`; the secret key stays with the maintainer).
 
 ## Ordinary updates
 
@@ -55,4 +55,4 @@ minisign -G -W -p /tmp/t/test.pub -s /tmp/t/test.key
 QUIET_MD_UPDATE_PUBKEY="$(tail -1 /tmp/t/test.pub)" cargo build --release --features devtools
 ```
 
-Serve a folder on `127.0.0.1` containing `latest/update-<platform>.json`, `latest/policy.json` and the package it names, each signed with the test key. On macOS the package is a zip of an ad-hoc signed `quiet.md.app`. Run the app with `QUIET_MD_UPDATE_URL=http://127.0.0.1:<port>/latest`, a temporary `QUIET_MD_HOME` and a temporary `HOME`, so downloads and the cached policy stay out of your own cache folder. To produce `policy.json`, run a copy of `publish-downloads.sh` with `host`, `pub`, `MINISIGN_KEY` and `WRANGLER` pointed at the test server, the test key and a stand-in that copies files instead of uploading them. Rebuild without `QUIET_MD_UPDATE_PUBKEY` afterwards. The unit tests in `update.rs` cover verification, version comparison and the misconfiguration case (`cargo test --release --bin quiet_md update::tests`).
+Serve a folder on `127.0.0.1` containing `latest/update-<platform>.json`, `latest/policy.json` and the package it names, each signed with the test key. On macOS the package is a zip of an ad-hoc signed `quiet.md.app`. Run the app with `QUIET_MD_UPDATE_URL=http://127.0.0.1:<port>/latest`, a temporary `QUIET_MD_HOME` and a temporary `HOME`, so downloads and the cached policy stay out of your own cache folder. To produce `policy.json`, run a copy of `publish-downloads.sh` with `host`, `pub`, `MINISIGN_KEY` and `WRANGLER` pointed at the test server, the test key and a stand-in that copies files instead of uploading them. Rebuild without `QUIET_MD_UPDATE_PUBKEY` afterwards. The unit tests in `desktop/update.rs` cover verification, version comparison and the misconfiguration case (`cargo test --release --bin quiet_md update::tests`).

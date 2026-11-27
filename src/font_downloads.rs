@@ -5,7 +5,7 @@
 //! Xiaolai when a board has CJK text Excalifont lacks (or copies a picture of
 //! it), a document font when the reader picks it.
 //!
-//! Each file is fetched with `curl`, as updates are (`update::curl_command`:
+//! Each file is fetched with `curl`, as updates are (`desktop::update::curl_command`:
 //! HTTPS only, the system's proxy settings), from
 //! `https://download.quiet.md/fonts/<name>`, a name that carries the file's
 //! SHA-256, which the catalog (compiled in) holds in full: a file that
@@ -341,10 +341,10 @@ fn obtain(id: &str, fetch: bool) -> Result<Vec<&'static [u8]>, Option<String>> {
 /// running copies may fetch at once; the rename is atomic).
 fn download(f: &File, url: &str, path: &Path, testing: bool) -> Result<Vec<u8>, String> {
     let part = part_path(path);
-    // curl gets no path: see update::fetch_package.
+    // curl gets no path: see desktop::update::fetch_package.
     let out = std::fs::File::create(&part).map_err(|e| e.to_string())?;
     let keep = (|| {
-        let o = crate::update::curl_command(testing).args(["--max-time", "1800", url]).stdin(std::process::Stdio::null())
+        let o = crate::desktop::update::curl_command(testing).args(["--max-time", "1800", url]).stdin(std::process::Stdio::null())
             .stdout(out).stderr(std::process::Stdio::piped()).output().map_err(|e| format!("curl: {e}"))?;
         if !o.status.success() { return Err(String::from_utf8_lossy(&o.stderr).trim().to_string()); }
         let b = std::fs::read(&part).map_err(|e| e.to_string())?;

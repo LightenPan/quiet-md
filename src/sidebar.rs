@@ -880,7 +880,7 @@ impl Workspace {
                     .on_click(cx.listener(move |w, _, _, cx| {
                         w.row_menu = None;
                         let id = new_window.clone();
-                        cx.defer(move |cx| crate::quick_note::open_document(Some(id), cx));
+                        cx.defer(move |cx| crate::desktop::quick_note::open_document(Some(id), cx));
                         cx.notify();
                     })),
             )
@@ -978,7 +978,7 @@ impl Workspace {
                             .px(px(5.))
                             .py(px(crate::ui::MENU_PAD_Y))
                             .child(canvas(move |b, _, _| record.set(Some(b)), |_, _, _, _| {}).absolute().inset_0())
-                            .when(crate::printing::SUPPORTED, |d| d.child(crate::docmenu::sub_item("rm-pdf", "PDF").on_click(cx.listener(move |w, _, window, cx| w.export_pdf(&pdf, window, cx)))))
+                            .when(crate::desktop::printing::SUPPORTED, |d| d.child(crate::docmenu::sub_item("rm-pdf", "PDF").on_click(cx.listener(move |w, _, window, cx| w.export_pdf(&pdf, window, cx)))))
                             .child(crate::docmenu::sub_item("rm-md", "Markdown").on_click(cx.listener(move |w, _, _, cx| w.open_export_md(&dl, cx)))),
                     ),
                 )

@@ -128,7 +128,7 @@ fn notes() -> Option<&'static [(&'static str, &'static str)]> { NOTES.iter().fin
 pub fn startup(existed: bool) {
     let mut p = crate::settings::prefs();
     if p.seen_version == VERSION { return }
-    let upgraded = existed && (p.seen_version.is_empty() || crate::update::newer(VERSION, &p.seen_version));
+    let upgraded = existed && (p.seen_version.is_empty() || crate::desktop::update::newer(VERSION, &p.seen_version));
     PENDING.store(upgraded && notes().is_some(), Ordering::Relaxed);
     p.seen_version = VERSION.into();
     if let Err(e) = crate::settings::save(&p) { log::warn!("changelog: {e:#}"); }
