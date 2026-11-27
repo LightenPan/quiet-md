@@ -89,6 +89,32 @@ class NutstoreWebDavClientTest {
     }
 
     @Test
+    fun scan_treats_a_one_level_infinity_reply_as_incomplete() = runBlocking {
+        val top = multistatus("""
+            <d:response><d:href>/dav/Quiet.md/</d:href><d:propstat><d:prop>
+            <d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+            <d:response><d:href>/dav/Quiet.md/%E7%AC%94%E8%AE%B0/</d:href><d:propstat><d:prop>
+            <d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+        """)
+        val level = multistatus("""
+            <d:response><d:href>/dav/Quiet.md/%E7%AC%94%E8%AE%B0/</d:href><d:propstat><d:prop>
+            <d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+            <d:response><d:href>/dav/Quiet.md/%E7%AC%94%E8%AE%B0/%E5%91%A8%E6%8A%A5.md</d:href>
+            <d:propstat><d:prop><d:resourcetype/><d:getetag>"e1"</d:getetag>
+            <d:getcontentlength>12</d:getcontentlength></d:prop></d:propstat></d:response>
+        """)
+        repeat(2) { server.enqueue(MockResponse().setResponseCode(207).setBody(top)) }
+        server.enqueue(MockResponse().setResponseCode(207).setBody(level))
+
+        val entries = client().scan()
+
+        assertTrue(entries.any { it.rel == "笔记/周报.md" && it.etag == "\"e1\"" })
+        assertEquals("infinity", server.takeRequest().getHeader("Depth"))
+        assertEquals("1", server.takeRequest().getHeader("Depth"))
+        assertEquals("1", server.takeRequest().getHeader("Depth"))
+    }
+
+    @Test
     fun scan_falls_back_to_levels_and_decodes_unicode_paths() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(405))
         server.enqueue(
@@ -127,10 +153,99 @@ class NutstoreWebDavClientTest {
         assertTrue(entries.any { it.rel == "Work/周报.md" && it.etag == "\"e1\"" })
     }
 
+    @Test
+    fun browse_lists_direct_folders_below_the_webdav_root() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(207).setBody(
+                multistatus("""
+                    <d:response><d:href>/dav/</d:href><d:propstat><d:prop>
+                    <d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+                    <d:response><d:href>/dav/Quiet.md/</d:href><d:propstat><d:prop>
+                    <d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+                    <d:response><d:href>/dav/%E7%AC%94%E8%AE%B0/</d:href><d:propstat><d:prop>
+                    <d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+                    <d:response><d:href>/dav/readme.md</d:href><d:propstat><d:prop>
+                    <d:resourcetype/><d:getcontentlength>3</d:getcontentlength></d:prop></d:propstat></d:response>
+                """)
+            )
+        )
+
+        val entries = client().browse("")
+
+        val request = server.takeRequest()
+        assertEquals("PROPFIND", request.method)
+        assertEquals("/dav/", request.path)
+        assertEquals("1", request.getHeader("Depth"))
+        assertEquals(listOf("Quiet.md", "笔记", "readme.md"), entries.map { it.rel })
+    }
+
+    @Test
+    fun browse_nested_folder_uses_its_server_path_and_keeps_unicode_names() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(207).setBody(
+                multistatus("""
+                    <d:response><d:href>/dav/Quiet.md/</d:href><d:propstat><d:prop>
+                    <d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+                    <d:response><d:href>/dav/Quiet.md/%E7%AC%94%E8%AE%B0/</d:href><d:propstat><d:prop>
+                    <d:resourcetype><d:collection/></d:resourcetype></d:prop></d:propstat></d:response>
+                """)
+            )
+        )
+
+        val entries = client().browse("Quiet.md")
+
+        val request = server.takeRequest()
+        assertEquals("/dav/Quiet.md/", request.path)
+        assertEquals("1", request.getHeader("Depth"))
+        assertEquals(listOf("Quiet.md/笔记"), entries.map { it.rel })
+    }
+
     @Test(expected = WebDavException::class)
     fun unauthenticated_request_is_reported_as_auth_error() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(401).setBody("unauthorized"))
         client().probe()
+    }
+
+    @Test
+    fun rate_limit_is_reported_with_a_retry_later_message() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(503).setBody(""))
+
+        try {
+            client().browse("")
+            org.junit.Assert.fail("expected WebDavException")
+        } catch (e: WebDavException) {
+            assertEquals(WebDavErrorKind.RATE_LIMITED, e.kind)
+            assertTrue(e.message.contains("频率"))
+        }
+    }
+
+    @Test
+    fun request_budget_pauses_before_the_next_network_call() = runBlocking {
+        server.enqueue(
+            MockResponse().setResponseCode(207).setBody(
+                multistatus("""<d:response><d:href>/dav/Quiet.md/</d:href>
+                    <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop>
+                    <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>""")
+            )
+        )
+        val api = NutstoreWebDavClient(
+            WebDavConfig.create(
+                server = server.url("/dav/").toString(),
+                username = "me@example.com",
+                remoteRoot = "Quiet.md"
+            ),
+            "app-password",
+            requestBudget = 1
+        )
+
+        api.probe()
+        try {
+            api.probe()
+            org.junit.Assert.fail("expected SyncPausedException")
+        } catch (e: SyncPausedException) {
+            assertTrue(e.message.orEmpty().contains("请求上限"))
+        }
+        assertEquals(1, server.requestCount)
     }
 
     @Test

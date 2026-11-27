@@ -7,6 +7,7 @@ class FakeWebDav : WebDavApi {
     val dirs = linkedSetOf<String>()
     val moves = mutableListOf<Pair<String, String>>()
     var getCalls = 0
+    var failGetAfter: Int? = null
 
     fun putFile(rel: String, bytes: ByteArray, etag: String? = null) {
         val normalized = SyncPaths.requireRelative(rel)
@@ -42,6 +43,9 @@ class FakeWebDav : WebDavApi {
 
     override suspend fun get(rel: String): ByteArray {
         getCalls++
+        if (failGetAfter != null && getCalls > failGetAfter!!) {
+            throw WebDavException(WebDavErrorKind.RATE_LIMITED, "rate limited", 503)
+        }
         val file = files[rel] ?: throw WebDavException(WebDavErrorKind.NOT_FOUND, "missing $rel", 404)
         return file.bytes.copyOf()
     }

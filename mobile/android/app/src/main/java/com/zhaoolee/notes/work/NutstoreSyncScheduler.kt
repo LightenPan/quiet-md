@@ -12,6 +12,7 @@ import androidx.work.WorkerParameters
 import com.zhaoolee.notes.sync.InitialPolicy
 import com.zhaoolee.notes.sync.NutstoreSyncController
 import com.zhaoolee.notes.sync.SyncOutcome
+import com.zhaoolee.notes.sync.SyncPausedException
 import com.zhaoolee.notes.sync.WebDavErrorKind
 import com.zhaoolee.notes.sync.WebDavException
 import java.util.concurrent.TimeUnit
@@ -73,10 +74,13 @@ class NutstoreSyncWorker(
                 is SyncOutcome.NeedsInitialChoice,
                 is SyncOutcome.Synced -> ListenableWorker.Result.success()
             }
+        } catch (_: SyncPausedException) {
+            ListenableWorker.Result.success()
         } catch (e: WebDavException) {
             when (e.kind) {
                 WebDavErrorKind.AUTH,
                 WebDavErrorKind.NOT_FOUND -> ListenableWorker.Result.failure()
+                WebDavErrorKind.RATE_LIMITED -> ListenableWorker.Result.success()
                 else -> ListenableWorker.Result.retry()
             }
         } catch (_: Exception) {

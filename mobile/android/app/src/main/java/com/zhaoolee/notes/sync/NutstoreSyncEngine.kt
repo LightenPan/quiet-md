@@ -6,7 +6,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.security.MessageDigest
 import java.time.ZonedDateTime
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 class NutstoreSyncEngine(
@@ -15,10 +17,12 @@ class NutstoreSyncEngine(
         options.localRoot,
         File(options.stateDir, "removed")
     ),
-    private val stateStore: SyncStateStore = SyncStateStore(options.stateDir)
+    private val stateStore: SyncStateStore = SyncStateStore(options.stateDir),
+    private val onProgress: ((SyncProgress) -> Unit)? = null
 ) {
     private val stateMutex = locks.computeIfAbsent(options.stateDir.absoluteFile.path) { Mutex() }
     private var state = SyncState()
+    private var stateDirty = false
     private var loadWarning: String? = null
 
     // NoteLibrary takes only the root lock, so always take root before state.
@@ -30,21 +34,43 @@ class NutstoreSyncEngine(
                 loadWarning = loaded.damagedPath?.let {
                     "坚果云同步状态已损坏，旧文件保留在 ${it.path}"
                 }
-                withContext(Dispatchers.IO) { syncLocked(api, policy) }
+                withContext(Dispatchers.IO) {
+                    try {
+                        syncLocked(api, policy)
+                    } catch (e: Exception) {
+                        if (stateDirty) runCatching { stateStore.save(state) }
+                        throw e
+                    }
+                }
             }
         }
 
     private suspend fun syncLocked(api: WebDavApi, policy: InitialPolicy): SyncOutcome {
-        validateConfig()
-        api.ensureRoot()
-        val remote = scanRemote(api)
-        val local = fileSystem.scan()
         val report = SyncReport()
+        emit(report, SyncPhase.CONNECTING)
+        validateConfig()
+        val persisted = if (state.scanComplete) null else state.initialPolicy?.let {
+            runCatching { InitialPolicy.valueOf(it) }.getOrNull()
+        }
+        val resuming = !state.scanComplete && persisted != null
+        if (!state.scanComplete && persisted == null && policy == InitialPolicy.MERGE_BOTH) {
+            state = state.copy(initialPolicy = policy.name)
+            stateDirty = true
+            stateStore.save(state)
+            stateDirty = false
+        }
+        val effectivePolicy = persisted ?: policy
+        api.ensureRoot()
+        emit(report, SyncPhase.SCANNING_REMOTE)
+        val remote = scanRemote(api)
+        emit(report, SyncPhase.SCANNING_LOCAL, remoteFiles = remote.files.size)
+        val local = fileSystem.scan()
         report.protectedPaths.addAll(local.protectedPaths)
         report.protectedPaths.addAll(remote.protectedPaths)
         loadWarning?.let { report.warnings.add(it); loadWarning = null }
         report.warnings.addAll(remote.warnings)
         report.warnings.addAll(local.warnings)
+        emit(report, SyncPhase.COMPARING, local.files.size, remote.files.size)
         preflightPaths(remote, local)
 
         if (state.scanComplete && remote.files.isEmpty() && remote.protectedPaths.isEmpty() &&
@@ -54,13 +80,24 @@ class NutstoreSyncEngine(
         }
 
         if (!state.scanComplete) {
-            val outcome = initialSync(api, remote, local, policy, report)
+            val outcome = initialSync(api, remote, local, effectivePolicy, resuming, report)
             if (outcome != null) {
+                if (outcome is SyncOutcome.Synced) {
+                    emit(report, SyncPhase.FINISHING, local.files.size, remote.files.size)
+                }
                 stateStore.save(state)
+                stateDirty = false
+                if (outcome is SyncOutcome.Synced) {
+                    emit(report, SyncPhase.DONE, local.files.size, remote.files.size)
+                }
                 return outcome
             }
-            state = state.copy(scanComplete = true)
+            state = state.copy(scanComplete = true, initialPolicy = null)
+            stateDirty = true
+            emit(report, SyncPhase.FINISHING, local.files.size, remote.files.size)
             stateStore.save(state)
+            stateDirty = false
+            emit(report, SyncPhase.DONE, local.files.size, remote.files.size)
             return SyncOutcome.Synced(report)
         }
 
@@ -68,8 +105,41 @@ class NutstoreSyncEngine(
         val after = fileSystem.scan()
         report.warnings.addAll(after.warnings)
         pushLocal(api, after, report)
+        emit(report, SyncPhase.FINISHING, after.files.size, remote.files.size)
         stateStore.save(state)
+        stateDirty = false
+        emit(report, SyncPhase.DONE, after.files.size, remote.files.size)
         return SyncOutcome.Synced(report)
+    }
+
+    private fun emit(
+        report: SyncReport,
+        phase: SyncPhase,
+        localFiles: Int = 0,
+        remoteFiles: Int = 0,
+        done: Int = 0,
+        total: Int? = null,
+        detail: String? = null
+    ) {
+        onProgress?.invoke(
+            SyncProgress(
+                phase = phase,
+                localFiles = localFiles,
+                remoteFiles = remoteFiles,
+                done = done,
+                total = total,
+                uploaded = report.uploaded,
+                downloaded = report.downloaded,
+                moved = report.moved,
+                conflicts = report.conflicts,
+                remoteDeleted = report.remoteDeleted,
+                localMovedToRecovery = report.localMovedToRecovery,
+                verified = report.verified,
+                fingerprintSkipped = report.fingerprintSkipped,
+                warnings = report.warnings.size,
+                detail = detail
+            )
+        )
     }
 
     private fun validateConfig() {
@@ -81,11 +151,14 @@ class NutstoreSyncEngine(
         ) {
             throw SyncException("坚果云账号或远程文件夹已经改变；请先重置这个文件夹的坚果云同步")
         }
-        state = state.copy(
-            server = config.server,
-            username = config.username,
-            remoteRoot = config.remoteRoot
-        )
+        if (state.server != config.server || state.username != config.username || state.remoteRoot != config.remoteRoot) {
+            state = state.copy(
+                server = config.server,
+                username = config.username,
+                remoteRoot = config.remoteRoot
+            )
+            stateDirty = true
+        }
     }
 
     private suspend fun initialSync(
@@ -93,77 +166,144 @@ class NutstoreSyncEngine(
         remote: RemoteTree,
         local: LocalScan,
         policy: InitialPolicy,
+        resuming: Boolean,
         report: SyncReport
     ): SyncOutcome? {
         val remoteHas = remote.files.isNotEmpty()
         val localHas = local.files.isNotEmpty()
-        if (remoteHas && localHas && policy == InitialPolicy.ASK) {
-            return SyncOutcome.NeedsInitialChoice(InitialChoice(local.files.size, remote.files.size))
+        var selectedPolicy = policy
+        if (remoteHas && localHas && policy == InitialPolicy.ASK && !resuming) {
+            val comparison = compareInitial(remote, local)
+            if (comparison.overlap > 0 && comparison.conflicts == 0) {
+                selectedPolicy = InitialPolicy.MERGE_BOTH
+                if (state.initialPolicy == null) {
+                    state = state.copy(initialPolicy = selectedPolicy.name)
+                    stateDirty = true
+                    stateStore.save(state)
+                    stateDirty = false
+                }
+            } else {
+                return SyncOutcome.NeedsInitialChoice(
+                    InitialChoice(local.files.size, remote.files.size, comparison.conflicts, comparison.unverified)
+                )
+            }
         }
-        if (policy == InitialPolicy.UPLOAD_LOCAL && remoteHas) {
+        if (selectedPolicy == InitialPolicy.UPLOAD_LOCAL && remoteHas && !resuming) {
             throw SyncException("坚果云远程文件夹已有文件；若要保留两边，请选择合并两边")
         }
-        if (policy == InitialPolicy.DOWNLOAD_REMOTE && localHas) {
+        if (selectedPolicy == InitialPolicy.DOWNLOAD_REMOTE && localHas && !resuming) {
             throw SyncException("本地文件夹已有文件；若要保留两边，请选择合并两边")
         }
 
-        state = state.copy(folders = LinkedHashSet(remote.dirs))
-        if (remoteHas && localHas && policy == InitialPolicy.MERGE_BOTH) {
-            for ((rel, entry) in remote.files) {
-                if (rel in report.protectedPaths) {
-                    report.warnings.add("$rel 本机文件无法安全读取或超过上限，合并时未覆盖")
-                    continue
+        val actual = when {
+            selectedPolicy != InitialPolicy.ASK -> selectedPolicy
+            remoteHas && !localHas -> InitialPolicy.DOWNLOAD_REMOTE
+            !remoteHas && localHas -> InitialPolicy.UPLOAD_LOCAL
+            else -> null
+        }
+        if (actual != null && state.initialPolicy == null) {
+            state = state.copy(initialPolicy = actual.name)
+            stateDirty = true
+            stateStore.save(state)
+            stateDirty = false
+        }
+        if (state.folders != remote.dirs) {
+            state = state.copy(folders = LinkedHashSet(remote.dirs))
+            stateDirty = true
+        }
+        if (remoteHas && localHas && selectedPolicy == InitialPolicy.MERGE_BOTH) {
+            val ordered = remote.files.entries.sortedBy { if (local.files.containsKey(it.key)) 1 else 0 }
+            val total = ordered.size
+            for ((index, item) in ordered.withIndex()) {
+                val (rel, entry) = item
+                try {
+                    if (alreadySynced(rel, entry, local, report)) continue
+                    if (rel in report.protectedPaths) {
+                        report.warnings.add("$rel 本机文件无法安全读取或超过上限，合并时未覆盖")
+                        continue
+                    }
+                    if ((entry.size ?: 0) > SyncLimits.MAX_BYTES) {
+                        report.warnings.add("$rel 超过 100 MB，未下载")
+                        continue
+                    }
+                    emit(report, SyncPhase.DOWNLOADING, local.files.size, remote.files.size, index, total, rel)
+                    val bytes = api.get(rel)
+                    val remoteSha = sha256(bytes)
+                    if (!fileSystem.isFile(rel)) {
+                        download(entry, rel, bytes, report)
+                        continue
+                    }
+                    val ours = fileSystem.read(rel)
+                    val oursSha = sha256(ours)
+                    if (oursSha == remoteSha) {
+                        remember(rel, entry, remoteSha)
+                        report.verified++
+                        continue
+                    }
+                    writeRemoteConflict(api, rel, bytes, local.files.keys, report)
+                    state.files[rel] = SyncFileState(
+                        etag = entry.etag,
+                        size = entry.size,
+                        modified = entry.modified,
+                        sha256 = oursSha,
+                        pendingUpload = true
+                    )
+                    stateDirty = true
+                    report.changedPaths.add(rel)
+                } finally {
+                    saveProgress(index + 1)
                 }
-                if ((entry.size ?: 0) > SyncLimits.MAX_BYTES) {
-                    report.warnings.add("$rel 超过 100 MB，未下载")
-                    continue
-                }
-                val bytes = api.get(rel)
-                val remoteSha = sha256(bytes)
-                if (!fileSystem.isFile(rel)) {
-                    download(entry, rel, bytes, report)
-                    continue
-                }
-                val ours = fileSystem.read(rel)
-                if (sha256(ours) == remoteSha) {
-                    remember(rel, entry, remoteSha)
-                    continue
-                }
-                writeRemoteConflict(api, rel, bytes, local.files.keys, report)
-                remember(rel, entry, remoteSha)
-                report.changedPaths.add(rel)
             }
             val after = fileSystem.scan()
             report.warnings.addAll(after.warnings)
             pushLocal(api, after, report)
-            state = state.copy(scanComplete = true)
+            state = state.copy(scanComplete = true, initialPolicy = null)
+            stateDirty = true
             stateStore.save(state)
+            stateDirty = false
             return SyncOutcome.Synced(report)
         }
 
-        if (remoteHas && (!localHas || policy == InitialPolicy.DOWNLOAD_REMOTE)) {
-            for ((rel, entry) in remote.files) {
-                if (rel in report.protectedPaths) {
-                    report.warnings.add("$rel 本机文件无法安全读取或超过上限，未下载覆盖")
-                    continue
+        if (remoteHas && (!localHas || selectedPolicy == InitialPolicy.DOWNLOAD_REMOTE)) {
+            val ordered = remote.files.entries.sortedBy { if (local.files.containsKey(it.key)) 1 else 0 }
+            val total = ordered.size
+            for ((index, item) in ordered.withIndex()) {
+                val (rel, entry) = item
+                try {
+                    if (alreadySynced(rel, entry, local, report)) continue
+                    if (rel in report.protectedPaths) {
+                        report.warnings.add("$rel 本机文件无法安全读取或超过上限，未下载覆盖")
+                        continue
+                    }
+                    if ((entry.size ?: 0) > SyncLimits.MAX_BYTES) {
+                        report.warnings.add("$rel 超过 100 MB，未下载")
+                        continue
+                    }
+                    emit(report, SyncPhase.DOWNLOADING, local.files.size, remote.files.size, index, total, rel)
+                    download(entry, rel, api.get(rel), report)
+                } finally {
+                    saveProgress(index + 1)
                 }
-                if ((entry.size ?: 0) > SyncLimits.MAX_BYTES) {
-                    report.warnings.add("$rel 超过 100 MB，未下载")
-                    continue
-                }
-                download(entry, rel, api.get(rel), report)
             }
         }
-        if (localHas && (!remoteHas || policy == InitialPolicy.UPLOAD_LOCAL)) {
-            for (rel in local.files.keys.sorted()) {
-                if (rel in report.protectedPaths) {
-                    report.warnings.add("$rel 无法安全同步，未上传覆盖")
-                    continue
+        if (localHas && (!remoteHas || selectedPolicy == InitialPolicy.UPLOAD_LOCAL)) {
+            val sorted = local.files.keys.sorted()
+            for ((index, rel) in sorted.withIndex()) {
+                try {
+                    if (alreadyUploaded(rel, local, remote, report)) continue
+                    if (rel in report.protectedPaths) {
+                        report.warnings.add("$rel 无法安全同步，未上传覆盖")
+                        continue
+                    }
+                    emit(report, SyncPhase.UPLOADING, local.files.size, remote.files.size, index, sorted.size, rel)
+                    uploadNew(api, rel, fileSystem.read(rel), report)
+                } finally {
+                    saveProgress(index + 1)
                 }
-                uploadNew(api, rel, fileSystem.read(rel), report)
             }
         }
-        state = state.copy(scanComplete = true)
+        state = state.copy(scanComplete = true, initialPolicy = null)
+        stateDirty = true
         return null
     }
 
@@ -182,6 +322,7 @@ class NutstoreSyncEngine(
             if (!fileSystem.isFile(old) || fileSystem.exists(new) || info.sha256 != oldState.sha256) continue
             fileSystem.moveFile(old, new)
             state.files.remove(old)
+            stateDirty = true
             val entry = remote.files[new] ?: continue
             state.files[new] = SyncFileState(
                 etag = entry.etag,
@@ -189,21 +330,38 @@ class NutstoreSyncEngine(
                 modified = entry.modified,
                 sha256 = oldState.sha256
             )
+            stateDirty = true
             movedTargets.add(new)
             report.moved++
             report.changedPaths.add(old)
             report.changedPaths.add(new)
         }
-        state = state.copy(folders = LinkedHashSet(remote.dirs))
-
-        for ((rel, entry) in remote.files) {
-            if (rel in movedTargets) continue
-            applyRemote(api, rel, entry, local, report)
+        if (state.folders != remote.dirs) {
+            state = state.copy(folders = LinkedHashSet(remote.dirs))
+            stateDirty = true
         }
 
-        for (rel in oldPaths) {
-            if (rel in remote.files || !state.files.containsKey(rel)) continue
-            dropRemote(rel, report)
+        val remoteTotal = remote.files.size
+        for ((index, item) in remote.files.entries.withIndex()) {
+            val (rel, entry) = item
+            try {
+                emit(report, SyncPhase.COMPARING, local.files.size, remote.files.size, index, remoteTotal, rel)
+                if (rel in movedTargets) continue
+                applyRemote(api, rel, entry, local, report)
+            } finally {
+                saveProgress(index + 1)
+            }
+        }
+
+        val removed = oldPaths.filter { it !in remote.files && state.files.containsKey(it) }
+        for ((index, rel) in removed.withIndex()) {
+            try {
+                emit(report, SyncPhase.DELETING, local.files.size, remote.files.size, index, removed.size, rel)
+                if (rel in remote.files || !state.files.containsKey(rel)) continue
+                dropRemote(rel, report)
+            } finally {
+                saveProgress(index + 1)
+            }
         }
         val obsoleteDirs = oldDirs - state.folders
         obsoleteDirs.sortedByDescending { it.count { ch -> ch == '/' } }.forEach {
@@ -229,35 +387,59 @@ class NutstoreSyncEngine(
         }
         val old = state.files[rel]
         if (old != null && !remoteChanged(old, entry)) {
-            remember(rel, entry, old.sha256)
-            return
+            if (old.pendingUpload) {
+                val fingerprint = fingerprintMatch(rel, entry, local.files[rel])
+                if (fingerprint != null) {
+                    remember(rel, entry, fingerprint)
+                    report.fingerprintSkipped++
+                    return
+                }
+                if (local.files.containsKey(rel)) return
+            } else {
+                if (local.files[rel]?.sha256 != old.sha256) {
+                    val fingerprint = fingerprintMatch(rel, entry, local.files[rel])
+                    if (fingerprint != null) {
+                        remember(rel, entry, fingerprint)
+                        report.fingerprintSkipped++
+                        return
+                    }
+                }
+                remember(rel, entry, old.sha256)
+                return
+            }
         }
-        val bytes = api.get(rel)
-        val remoteSha = sha256(bytes)
-        if (!fileSystem.isFile(rel)) {
-            download(entry, rel, bytes, report)
-            return
-        }
-        val ours = fileSystem.read(rel)
-        val oursSha = sha256(ours)
-        if (oursSha == remoteSha) {
-            remember(rel, entry, remoteSha)
-            return
-        }
-        if (old == null) {
+        val fingerprint = fingerprintMatch(rel, entry, local.files[rel]) ?: run {
+            val bytes = api.get(rel)
+            val remoteSha = sha256(bytes)
+            if (!fileSystem.isFile(rel)) {
+                download(entry, rel, bytes, report)
+                return
+            }
+            val ours = fileSystem.read(rel)
+            val oursSha = sha256(ours)
+            if (oursSha == remoteSha) {
+                remember(rel, entry, remoteSha)
+                report.verified++
+                return
+            }
+            if (old == null) {
+                writeRemoteConflict(api, rel, bytes, local.files.keys, report)
+                remember(rel, entry, remoteSha)
+                report.changedPaths.add(rel)
+                return
+            }
+            if (oursSha == old.sha256 && !old.pendingUpload) {
+                download(entry, rel, bytes, report)
+                return
+            }
+            report.warnings.add("$rel 在两处都有修改；保留本机版本，远端版本另存为冲突副本")
             writeRemoteConflict(api, rel, bytes, local.files.keys, report)
             remember(rel, entry, remoteSha)
             report.changedPaths.add(rel)
             return
         }
-        if (oursSha == old.sha256) {
-            download(entry, rel, bytes, report)
-            return
-        }
-        report.warnings.add("$rel 在两处都有修改；保留本机版本，远端版本另存为冲突副本")
-        writeRemoteConflict(api, rel, bytes, local.files.keys, report)
-        remember(rel, entry, remoteSha)
-        report.changedPaths.add(rel)
+        remember(rel, entry, fingerprint)
+        report.fingerprintSkipped++
     }
 
     private fun download(entry: RemoteEntry, rel: String, bytes: ByteArray, report: SyncReport) {
@@ -299,6 +481,7 @@ class NutstoreSyncEngine(
 
     private fun dropRemote(rel: String, report: SyncReport) {
         val old = state.files.remove(rel) ?: return
+        stateDirty = true
         if (!fileSystem.isFile(rel)) return
         val bytes = try {
             fileSystem.read(rel)
@@ -335,51 +518,73 @@ class NutstoreSyncEngine(
             ensureRemoteDir(api, SyncPaths.parentRel(new))
             api.move(old, new, false)
             state.files.remove(old)
+            stateDirty = true
             state.files[new] = SyncFileState(
                 etag = moved.value.etag,
                 size = local.files[new]?.size,
                 modified = moved.value.modified,
                 sha256 = hash
             )
+            stateDirty = true
             handled.add(new)
             report.moved++
             report.changedPaths.add(old)
             report.changedPaths.add(new)
         }
 
-        for (rel in local.files.keys.sorted()) {
-            if (state.files.containsKey(rel) || rel in handled) continue
-            if (rel in report.protectedPaths) {
-                report.warnings.add("$rel 本轮受保护，未上传")
-                continue
+        val sorted = local.files.keys.sorted()
+        for ((index, rel) in sorted.withIndex()) {
+            try {
+                if (state.files.containsKey(rel) || rel in handled) continue
+                if (rel in report.protectedPaths) {
+                    report.warnings.add("$rel 本轮受保护，未上传")
+                    continue
+                }
+                if (state.files.keys.any { SyncPaths.pathKey(it) == SyncPaths.pathKey(rel) }) {
+                    throw SyncException("本机有仅大小写不同的同名文件，暂停同步：$rel")
+                }
+                emit(report, SyncPhase.UPLOADING, local.files.size, state.files.size, index, sorted.size, rel)
+                uploadNew(api, rel, fileSystem.read(rel), report)
+            } finally {
+                saveProgress(index + 1)
             }
-            if (state.files.keys.any { SyncPaths.pathKey(it) == SyncPaths.pathKey(rel) }) {
-                throw SyncException("本机有仅大小写不同的同名文件，暂停同步：$rel")
-            }
-            uploadNew(api, rel, fileSystem.read(rel), report)
         }
 
-        for ((rel, old) in state.files.entries.toList()) {
-            val current = local.files[rel] ?: continue
-            if (rel in handled || current.sha256 == old.sha256) continue
-            if (rel in report.protectedPaths) {
-                report.warnings.add("$rel 本轮受保护，未上传")
-                continue
+        val existing = state.files.entries.toList()
+        for ((index, item) in existing.withIndex()) {
+            val (rel, old) = item
+            try {
+                val current = local.files[rel] ?: continue
+                if (rel in handled || (current.sha256 == old.sha256 && !old.pendingUpload)) continue
+                if (rel in report.protectedPaths) {
+                    report.warnings.add("$rel 本轮受保护，未上传")
+                    continue
+                }
+                emit(report, SyncPhase.UPLOADING, local.files.size, state.files.size, index, existing.size, rel)
+                uploadExisting(api, rel, report)
+            } finally {
+                saveProgress(index + 1)
             }
-            uploadExisting(api, rel, report)
         }
 
-        for (rel in state.files.keys.toList()) {
-            if (local.files.containsKey(rel) || rel in handled) continue
-            if (rel in report.protectedPaths) {
-                report.warnings.add("$rel 本机文件无法安全读取或超过上限，未从坚果云删除")
-                continue
+        val deleting = state.files.keys.toList()
+        for ((index, rel) in deleting.withIndex()) {
+            try {
+                if (local.files.containsKey(rel) || rel in handled) continue
+                if (rel in report.protectedPaths) {
+                    report.warnings.add("$rel 本机文件无法安全读取或超过上限，未从坚果云删除")
+                    continue
+                }
+                emit(report, SyncPhase.DELETING, local.files.size, state.files.size, index, deleting.size, rel)
+                val stateBefore = state.files[rel] ?: continue
+                api.remove(rel, false, stateBefore.etag)
+                state.files.remove(rel)
+                stateDirty = true
+                report.remoteDeleted++
+                report.changedPaths.add(rel)
+            } finally {
+                saveProgress(index + 1)
             }
-            val stateBefore = state.files[rel] ?: continue
-            api.remove(rel, false, stateBefore.etag)
-            state.files.remove(rel)
-            report.remoteDeleted++
-            report.changedPaths.add(rel)
         }
     }
 
@@ -407,15 +612,125 @@ class NutstoreSyncEngine(
         ensureRemoteDir(api, SyncPaths.parentRel(normalized))
         api.createDir(normalized)
         state.folders.add(normalized)
+        stateDirty = true
     }
 
     private fun remember(rel: String, entry: RemoteEntry, hash: String) {
-        state.files[SyncPaths.nfc(rel)] = SyncFileState(
+        val next = SyncFileState(
             etag = entry.etag,
             size = entry.size,
             modified = entry.modified,
             sha256 = hash
         )
+        val key = SyncPaths.nfc(rel)
+        if (state.files[key] != next) {
+            state.files[key] = next
+            stateDirty = true
+        }
+    }
+
+    private fun compareInitial(remote: RemoteTree, local: LocalScan): InitialComparison {
+        var overlap = 0
+        var conflicts = 0
+        var unverified = 0
+        for ((rel, entry) in remote.files) {
+            val info = local.files[rel] ?: continue
+            overlap++
+            val known = state.files[rel]
+            val remoteUnchanged = known != null && !remoteChanged(known, entry)
+            if (known != null && remoteUnchanged && !known.pendingUpload &&
+                known.sha256.isNotEmpty() && known.sha256 == info.sha256
+            ) {
+                continue
+            }
+            if (entry.size != null && entry.size != info.size) {
+                conflicts++
+                continue
+            }
+            if (known != null && remoteUnchanged && !known.pendingUpload && known.sha256.isNotEmpty()) {
+                conflicts++
+                continue
+            }
+            if (known?.pendingUpload == true) {
+                if (fingerprintMatch(rel, entry, info) != null) continue
+                unverified++
+                continue
+            }
+            if (etagFingerprint(entry.etag) == null) {
+                unverified++
+                continue
+            }
+            if (fingerprintMatch(rel, entry, info) != null) continue
+            unverified++
+        }
+        return InitialComparison(overlap, conflicts, unverified)
+    }
+
+    private data class InitialComparison(
+        val overlap: Int,
+        val conflicts: Int,
+        val unverified: Int
+    )
+
+    private fun alreadySynced(rel: String, entry: RemoteEntry, local: LocalScan, report: SyncReport): Boolean {
+        val known = state.files[rel]
+        if (known != null && !remoteChanged(known, entry)) {
+            if (known.pendingUpload) {
+                val fingerprint = fingerprintMatch(rel, entry, local.files[rel])
+                if (fingerprint != null) {
+                    remember(rel, entry, fingerprint)
+                    report.fingerprintSkipped++
+                    return true
+                }
+                return local.files.containsKey(rel)
+            }
+            if (known.sha256.isNotEmpty() && local.files[rel]?.sha256 == known.sha256) return true
+        }
+        val fingerprint = fingerprintMatch(rel, entry, local.files[rel]) ?: return false
+        remember(rel, entry, fingerprint)
+        report.fingerprintSkipped++
+        return true
+    }
+
+    private fun alreadyUploaded(rel: String, local: LocalScan, remote: RemoteTree, report: SyncReport): Boolean {
+        val entry = remote.files[rel] ?: return false
+        val known = state.files[rel]
+        if (known != null && !known.pendingUpload && !remoteChanged(known, entry) &&
+            local.files[rel]?.sha256 == known.sha256
+        ) {
+            return true
+        }
+        val fingerprint = fingerprintMatch(rel, entry, local.files[rel]) ?: return false
+        remember(rel, entry, fingerprint)
+        report.fingerprintSkipped++
+        return true
+    }
+
+    private fun fingerprintMatch(rel: String, entry: RemoteEntry, info: LocalFileInfo?): String? {
+        if (info == null) return null
+        if (entry.size != null && entry.size != info.size) return null
+        val hash = etagFingerprint(entry.etag) ?: return null
+        if (hash.length == 64) return info.sha256.takeIf { it == hash }
+        val algorithm = when (hash.length) {
+            32 -> "MD5"
+            40 -> "SHA-1"
+            else -> return null
+        }
+        val bytes = runCatching { fileSystem.read(rel) }.getOrNull() ?: return null
+        val digest = MessageDigest.getInstance(algorithm).digest(bytes).joinToString("") { "%02x".format(it) }
+        return info.sha256.takeIf { digest == hash }
+    }
+
+    private fun etagFingerprint(etag: String?): String? {
+        if (etag.isNullOrBlank()) return null
+        return ETAG_HASH.find(etag)?.groupValues?.get(1)?.lowercase(Locale.ROOT)
+    }
+
+    private fun saveProgress(processed: Int) {
+        if (!stateDirty) return
+        if (processed <= 0 || processed % STATE_SAVE_BATCH != 0) return
+        stateStore.save(state)
+        stateDirty = false
     }
 
     private fun remoteMoves(remote: RemoteTree, local: LocalScan): Map<String, String> {
@@ -525,6 +840,8 @@ class NutstoreSyncEngine(
     )
 
     private companion object {
+        const val STATE_SAVE_BATCH = 20
+        val ETAG_HASH = Regex("(?i)(?:^|[^0-9a-z])([0-9a-f]{64}|[0-9a-f]{40}|[0-9a-f]{32})(?![0-9a-z])")
         val locks = ConcurrentHashMap<String, Mutex>()
     }
 }

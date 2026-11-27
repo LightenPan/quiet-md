@@ -14,7 +14,8 @@ data class SyncFileState(
     val etag: String? = null,
     val size: Long? = null,
     val modified: String? = null,
-    val sha256: String = ""
+    val sha256: String = "",
+    val pendingUpload: Boolean = false
 )
 
 data class SyncState(
@@ -23,6 +24,7 @@ data class SyncState(
     val username: String = "",
     val remoteRoot: String = "",
     val scanComplete: Boolean = false,
+    val initialPolicy: String? = null,
     val files: LinkedHashMap<String, SyncFileState> = linkedMapOf(),
     val folders: LinkedHashSet<String> = linkedSetOf()
 ) {
@@ -38,6 +40,13 @@ class SyncStateStore(private val dir: File) {
     private val gson = GsonBuilder().setPrettyPrinting().create()
 
     val stateFile: File get() = File(dir, "state.json")
+
+    fun isScanComplete(): Boolean {
+        if (!stateFile.isFile) return false
+        return runCatching {
+            gson.fromJson(stateFile.readText(Charsets.UTF_8), SyncState::class.java)?.scanComplete == true
+        }.getOrDefault(false)
+    }
 
     fun load(): LoadedSyncState {
         if (!stateFile.isFile) return LoadedSyncState(SyncState())
@@ -89,6 +98,8 @@ internal fun atomicWrite(target: File, bytes: ByteArray) {
 
 class SyncException(message: String, cause: Throwable? = null) : Exception(message, cause)
 
+class SyncPausedException(message: String) : Exception(message)
+
 data class SyncOptions(
     val localRoot: File,
     val stateDir: File,
@@ -106,7 +117,9 @@ enum class InitialPolicy {
 
 data class InitialChoice(
     val localFiles: Int,
-    val remoteFiles: Int
+    val remoteFiles: Int,
+    val conflicts: Int = 0,
+    val unverified: Int = 0
 )
 
 data class SyncReport(
@@ -116,6 +129,8 @@ data class SyncReport(
     var conflicts: Int = 0,
     var remoteDeleted: Int = 0,
     var localMovedToRecovery: Int = 0,
+    var verified: Int = 0,
+    var fingerprintSkipped: Int = 0,
     val changedPaths: LinkedHashSet<String> = linkedSetOf(),
     val warnings: MutableList<String> = mutableListOf(),
     val protectedPaths: LinkedHashSet<String> = linkedSetOf()

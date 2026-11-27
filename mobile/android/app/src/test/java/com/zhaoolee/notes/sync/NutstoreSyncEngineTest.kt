@@ -11,6 +11,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.security.MessageDigest
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneId
@@ -47,6 +48,9 @@ class NutstoreSyncEngineTest {
     }
 
     private fun read(rel: String): String = File(root, rel).readText(Charsets.UTF_8)
+
+    private fun md5(bytes: ByteArray): String =
+        MessageDigest.getInstance("MD5").digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun localConflictFiles(): List<File> =
         root.walkTopDown().filter { it.isFile && it.name.contains("冲突") }.toList()
@@ -314,5 +318,160 @@ class NutstoreSyncEngineTest {
 
         assertEquals("remote change", read("a.md"))
         assertEquals(1, report.downloaded)
+    }
+
+    @Test
+    fun sync_reports_phases_and_transfer_progress() = runBlocking {
+        write("a.md", "a")
+        write("Work/b.md", "b")
+        val seen = mutableListOf<SyncProgress>()
+        val engine = NutstoreSyncEngine(
+            SyncOptions(root, stateDir, config, "Android", clock),
+            onProgress = { seen.add(it) }
+        )
+
+        val report = (engine.sync(fake, InitialPolicy.ASK) as SyncOutcome.Synced).report
+
+        assertTrue(seen.any { it.phase == SyncPhase.CONNECTING })
+        assertTrue(seen.any { it.phase == SyncPhase.SCANNING_REMOTE })
+        assertTrue(seen.any { it.phase == SyncPhase.SCANNING_LOCAL && it.remoteFiles == 0 })
+        assertTrue(seen.any { it.phase == SyncPhase.UPLOADING && it.total == 2 && it.detail == "Work/b.md" })
+        assertEquals(SyncPhase.DONE, seen.last().phase)
+        assertEquals(report.uploaded, seen.last().uploaded)
+        assertEquals(2, seen.last().uploaded)
+    }
+
+    @Test
+    fun initial_merge_resumes_and_does_not_refetch_saved_downloads() = runBlocking {
+        write("local.md", "local")
+        repeat(6) { index -> fake.putFile("remote-$index.md", "remote $index".toByteArray()) }
+        fake.failGetAfter = 2
+
+        try {
+            engine().sync(fake, InitialPolicy.MERGE_BOTH)
+            fail("expected rate limit")
+        } catch (_: WebDavException) {
+        }
+
+        val saved = SyncStateStore(stateDir).load().state
+        assertFalse(saved.scanComplete)
+        assertEquals(InitialPolicy.MERGE_BOTH.name, saved.initialPolicy)
+        assertEquals(2, saved.files.keys.count { it.startsWith("remote-") })
+        assertEquals(3, fake.getCalls)
+
+        fake.failGetAfter = null
+        val report = (engine().sync(fake, InitialPolicy.ASK) as SyncOutcome.Synced).report
+
+        assertEquals(7, fake.getCalls)
+        assertEquals(4, report.downloaded)
+        assertTrue((0..5).all { File(root, "remote-$it.md").isFile })
+        assertEquals("local", fake.files.getValue("local.md").bytes.toString(Charsets.UTF_8))
+        assertTrue(SyncStateStore(stateDir).load().state.scanComplete)
+    }
+
+    @Test
+    fun content_hash_etag_is_compared_without_downloading() = runBlocking {
+        val text = "same content"
+        write("a.md", text)
+        fake.putFile("a.md", text.toByteArray(), etag = "\"${md5(text.toByteArray())}\"")
+
+        val report = (engine().sync(fake, InitialPolicy.MERGE_BOTH) as SyncOutcome.Synced).report
+
+        assertEquals(0, fake.getCalls)
+        assertEquals(1, report.fingerprintSkipped)
+        assertEquals(0, report.uploaded)
+        assertEquals(text, read("a.md"))
+        assertTrue(SyncStateStore(stateDir).load().state.files.containsKey("a.md"))
+    }
+
+    @Test
+    fun sha256_etag_is_compared_without_reading_the_file_again() = runBlocking {
+        val text = "same sha content"
+        write("a.md", text)
+        fake.putFile("a.md", text.toByteArray(), etag = "\"${sha256(text.toByteArray())}\"")
+
+        val report = (engine().sync(fake, InitialPolicy.MERGE_BOTH) as SyncOutcome.Synced).report
+
+        assertEquals(0, fake.getCalls)
+        assertEquals(1, report.fingerprintSkipped)
+        assertEquals(0, report.uploaded)
+    }
+
+    @Test
+    fun changed_content_hash_etag_skips_download_when_local_already_matches() = runBlocking {
+        val text = "same incremental content"
+        write("a.md", text)
+        fake.putFile("a.md", text.toByteArray(), etag = "\"old\"")
+        val engine = engine()
+        engine.sync(fake, InitialPolicy.MERGE_BOTH)
+        val reads = fake.getCalls
+
+        fake.putFile("a.md", text.toByteArray(), etag = "\"${md5(text.toByteArray())}\"")
+        val report = (engine.sync(fake, InitialPolicy.ASK) as SyncOutcome.Synced).report
+
+        assertEquals(reads, fake.getCalls)
+        assertEquals(1, report.fingerprintSkipped)
+        assertEquals(0, report.downloaded)
+    }
+
+    @Test
+    fun unchanged_incremental_sync_transfers_no_file_contents() = runBlocking {
+        write("a.md", "stable")
+        val engine = engine()
+        engine.sync(fake, InitialPolicy.ASK)
+
+        val report = (engine.sync(fake, InitialPolicy.ASK) as SyncOutcome.Synced).report
+
+        assertEquals(0, fake.getCalls)
+        assertEquals(0, report.uploaded)
+        assertEquals(0, report.downloaded)
+    }
+
+    @Test
+    fun identical_fingerprint_overlap_does_not_ask_for_merge() = runBlocking {
+        val text = "same initial content"
+        write("a.md", text)
+        fake.putFile("a.md", text.toByteArray(), etag = "\"${md5(text.toByteArray())}\"")
+
+        val outcome = engine().sync(fake, InitialPolicy.ASK)
+
+        assertTrue(outcome is SyncOutcome.Synced)
+        assertEquals(0, fake.getCalls)
+        assertEquals(1, (outcome as SyncOutcome.Synced).report.fingerprintSkipped)
+    }
+
+    @Test
+    fun initial_choice_counts_only_real_content_differences() = runBlocking {
+        write("a.md", "local")
+        fake.putFile("a.md", "different".toByteArray(), etag = "\"e1\"")
+
+        val choice = engine().sync(fake, InitialPolicy.ASK) as SyncOutcome.NeedsInitialChoice
+
+        assertEquals(1, choice.choice.conflicts)
+        assertEquals(0, choice.choice.unverified)
+        assertEquals(0, fake.getCalls)
+    }
+
+    @Test
+    fun hash_mismatch_is_verified_during_merge_instead_of_blocking() = runBlocking {
+        write("a.md", "local")
+        fake.putFile("a.md", "remot".toByteArray(), etag = "\"${md5("remot".toByteArray())}\"")
+
+        val report = (engine().sync(fake, InitialPolicy.ASK) as SyncOutcome.Synced).report
+
+        assertEquals(1, fake.getCalls)
+        assertEquals(1, report.conflicts)
+    }
+
+    @Test
+    fun non_hash_etag_is_verified_automatically() = runBlocking {
+        write("a.md", "same")
+        fake.putFile("a.md", "same".toByteArray(), etag = "\"e1\"")
+
+        val report = (engine().sync(fake, InitialPolicy.ASK) as SyncOutcome.Synced).report
+
+        assertEquals(1, fake.getCalls)
+        assertEquals(1, report.verified)
+        assertEquals(0, report.conflicts)
     }
 }

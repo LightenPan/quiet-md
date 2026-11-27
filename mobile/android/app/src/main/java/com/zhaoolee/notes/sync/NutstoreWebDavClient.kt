@@ -28,7 +28,9 @@ class NutstoreWebDavClient(
     config: WebDavConfig,
     password: String,
     private val client: OkHttpClient = OkHttpClient(),
-    private val maxDownloadBytes: Long = SyncLimits.MAX_BYTES
+    private val maxDownloadBytes: Long = SyncLimits.MAX_BYTES,
+    private val requestIntervalMs: Long = 0,
+    private val requestBudget: Int? = null
 ) : WebDavApi {
     private val config = config.copy(
         server = SyncPaths.normalizeServer(config.server),
@@ -48,6 +50,11 @@ class NutstoreWebDavClient(
         rootParts.forEach { append('/').append(it) }
         append('/')
     }
+    private val serverBasePath = decodedUrlPath(this@NutstoreWebDavClient.config.server).trimEnd('/')
+    private val paceLock = Any()
+    private val budgetLock = Any()
+    private var lastRequestAtNanos = 0L
+    private var requestCount = 0
 
     override suspend fun probe() = withContext(Dispatchers.IO) {
         propfind("", "0", true)
@@ -89,7 +96,26 @@ class NutstoreWebDavClient(
             }
             throw e
         }
-        if (deep.size < 750) deep else scanLevels()
+        if (deep.size >= 750) return@withContext scanLevels()
+        // Nutstore answers `Depth: infinity` with one level only. A result
+        // holding folders but nothing below them is not the whole tree.
+        if (deep.any { it.isDir } && deep.none { it.rel.contains('/') }) return@withContext scanLevels()
+        deep
+    }
+
+    suspend fun browse(path: String): List<RemoteEntry> = withContext(Dispatchers.IO) {
+        val normalized = if (path.isEmpty()) "" else SyncPaths.requireRelative(path)
+        val entries = propfindAt(serverUrl(normalized, true), "1", serverBasePath)
+        if (entries.size >= 750) {
+            throw WebDavException(
+                WebDavErrorKind.OTHER,
+                "坚果云单个文件夹超过 750 项，WebDAV 无法完整分页；请选择下一级文件夹"
+            )
+        }
+        entries.asSequence()
+            .filter { it.rel != normalized && SyncPaths.parentRel(it.rel) == normalized }
+            .sortedWith(compareByDescending<RemoteEntry> { it.isDir }.thenBy { it.rel.lowercase(Locale.ROOT) })
+            .toList()
     }
 
     override suspend fun get(rel: String): ByteArray = withContext(Dispatchers.IO) {
@@ -181,7 +207,7 @@ class NutstoreWebDavClient(
     private fun propfind(rel: String, depth: String, dir: Boolean): List<RemoteEntry> =
         propfindAt(url(rel, dir), depth)
 
-    private fun propfindAt(target: String, depth: String): List<RemoteEntry> {
+    private fun propfindAt(target: String, depth: String, base: String = basePath): List<RemoteEntry> {
         val response = send(
             Request.Builder()
                 .url(target)
@@ -193,7 +219,7 @@ class NutstoreWebDavClient(
                 .header("Depth", depth),
             SyncLimits.SCAN_TIMEOUT_SECONDS
         )
-        return parseMultiStatus(response.body)
+        return parseMultiStatus(response.body, base)
     }
 
     private fun send(
@@ -201,6 +227,8 @@ class NutstoreWebDavClient(
         timeoutSeconds: Long,
         maxBodyBytes: Long = XML_RESPONSE_LIMIT
     ): RawResponse {
+        reserveRequest()
+        paceRequest()
         val request = builder
             .header("Authorization", authorization)
             .header("Accept", "application/xml, application/octet-stream")
@@ -220,6 +248,30 @@ class NutstoreWebDavClient(
             }
             if (it.code !in 200..299) throw mapError(it.code, headers, body)
             return RawResponse(it.code, headers, body)
+        }
+    }
+
+    private fun reserveRequest() {
+        val budget = requestBudget ?: return
+        synchronized(budgetLock) {
+            if (requestCount >= budget) {
+                throw SyncPausedException("本轮已达到坚果云请求上限，进度已保存；请约 30 分钟后再继续")
+            }
+            requestCount++
+        }
+    }
+
+    private fun paceRequest() {
+        if (requestIntervalMs <= 0) return
+        synchronized(paceLock) {
+            if (lastRequestAtNanos != 0L) {
+                val interval = requestIntervalMs * 1_000_000L
+                val elapsed = System.nanoTime() - lastRequestAtNanos
+                if (elapsed < interval) {
+                    Thread.sleep(((interval - elapsed) / 1_000_000L).coerceAtLeast(1L))
+                }
+            }
+            lastRequestAtNanos = System.nanoTime()
         }
     }
 
@@ -245,7 +297,7 @@ class NutstoreWebDavClient(
         return out.toByteArray()
     }
 
-    private fun parseMultiStatus(body: ByteArray): List<RemoteEntry> {
+    private fun parseMultiStatus(body: ByteArray, base: String): List<RemoteEntry> {
         val factory = DocumentBuilderFactory.newInstance().apply {
             isNamespaceAware = true
             runCatching { setFeature(XMLConstants.FEATURE_SECURE_PROCESSING, true) }
@@ -266,7 +318,7 @@ class NutstoreWebDavClient(
         for (i in 0 until responses.length) {
             val response = responses.item(i) as? Element ?: continue
             val href = text(response, "href") ?: continue
-            val rel = hrefToRelativePath(href) ?: continue
+            val rel = hrefToRelativePath(href, base) ?: continue
             if (rel.isEmpty()) continue
             if (!SyncPaths.safeRelative(rel)) {
                 throw WebDavException(WebDavErrorKind.OTHER, "WebDAV 返回了不安全的路径：$rel")
@@ -300,7 +352,7 @@ class NutstoreWebDavClient(
     private fun text(parent: Element, localName: String): String? =
         elements(parent, localName).firstOrNull()?.textContent?.trim()
 
-    private fun hrefToRelativePath(href: String): String? {
+    private fun hrefToRelativePath(href: String, basePath: String): String? {
         var path = href.trim()
         if (path.isEmpty()) return null
         if ("://" in path) {
@@ -328,8 +380,10 @@ class NutstoreWebDavClient(
 
     private fun serverUrl(rel: String, dir: Boolean): String {
         val out = StringBuilder(config.server.trimEnd('/'))
-        SyncPaths.requireRelative(rel).split('/').forEach {
-            out.append('/').append(SyncPaths.encodeSegment(it))
+        if (rel.isNotEmpty()) {
+            SyncPaths.requireRelative(rel).split('/').forEach {
+                out.append('/').append(SyncPaths.encodeSegment(it))
+            }
         }
         if (dir) out.append('/')
         return out.toString()
@@ -375,7 +429,11 @@ class NutstoreWebDavClient(
             .map { it.trim() }
             .firstOrNull { it.isNotEmpty() && !it.startsWith('<') && !it.startsWith("<?xml") }
             ?.take(240)
-        val message = detail ?: "坚果云 WebDAV 返回 HTTP $status"
+        val message = when {
+            status == 429 || status == 503 -> "坚果云暂时限制了访问频率，请稍后再试"
+            detail != null -> detail
+            else -> "坚果云 WebDAV 返回 HTTP $status"
+        }
         return WebDavException(
             kind,
             message,

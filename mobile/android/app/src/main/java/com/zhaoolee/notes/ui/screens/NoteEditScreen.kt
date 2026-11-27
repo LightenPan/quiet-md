@@ -22,16 +22,19 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -47,6 +50,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -66,6 +70,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.zhaoolee.notes.ui.markdown.MarkdownPreview
 import com.zhaoolee.notes.viewmodel.NoteViewModel
 import com.zhaoolee.notes.viewmodel.SaveState
 import java.text.SimpleDateFormat
@@ -89,6 +94,7 @@ fun NoteEditScreen(
     var showReload by rememberSaveable { mutableStateOf(false) }
     var showMove by rememberSaveable { mutableStateOf(false) }
     var moveFolder by rememberSaveable { mutableStateOf("") }
+    var preview by rememberSaveable { mutableStateOf(false) }
 
     val editor = state
     if (editor == null || (editor.loading && editor.note == null)) {
@@ -96,6 +102,10 @@ fun NoteEditScreen(
             CircularProgressIndicator()
         }
         return
+    }
+
+    LaunchedEffect(editor.relativePath) {
+        preview = false
     }
 
     fun leaveEditor() {
@@ -119,7 +129,11 @@ fun NoteEditScreen(
                 title = {
                     Column {
                         Text(
-                            if (editor.readOnly) "只读文档" else "编辑便签",
+                            when {
+                                editor.readOnly -> "只读文档"
+                                preview -> "便签预览"
+                                else -> "编辑便签"
+                            },
                             style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
                             color = MaterialTheme.colorScheme.onBackground
                         )
@@ -264,7 +278,7 @@ fun NoteEditScreen(
                     .onFocusChanged {
                         if (!it.isFocused) viewModel.normalizeTitleOnBlur()
                     },
-                readOnly = editor.readOnly,
+                readOnly = editor.readOnly || preview,
                 singleLine = true,
                 placeholder = { Text("标题") },
                 textStyle = MaterialTheme.typography.headlineMedium.copy(
@@ -278,31 +292,65 @@ fun NoteEditScreen(
                     cursorColor = MaterialTheme.colorScheme.primary
                 )
             )
-            OutlinedTextField(
-                value = editor.body,
-                onValueChange = viewModel::updateBody,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 320.dp),
-                readOnly = editor.readOnly,
-                placeholder = {
+            if (editor.note?.editable == true) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text(
-                        if (editor.readOnly) "只读内容" else "开始记录，支持 Markdown…",
+                        "正文",
+                        style = MaterialTheme.typography.labelLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                },
-                textStyle = MaterialTheme.typography.bodyLarge.copy(
-                    color = MaterialTheme.colorScheme.onSurface,
-                    lineHeight = 26.sp
-                ),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Color.Transparent,
-                    unfocusedBorderColor = Color.Transparent,
-                    focusedContainerColor = Color.Transparent,
-                    unfocusedContainerColor = Color.Transparent,
-                    cursorColor = MaterialTheme.colorScheme.primary
+                    TextButton(
+                        onClick = { preview = !preview },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                    ) {
+                        Icon(
+                            if (preview) Icons.Default.Edit else Icons.Default.Visibility,
+                            null,
+                            Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (preview) "编辑" else "预览")
+                    }
+                }
+            }
+            if (preview && editor.note?.editable == true) {
+                SelectionContainer {
+                    MarkdownPreview(
+                        editor.body,
+                        Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                    )
+                }
+            } else {
+                OutlinedTextField(
+                    value = editor.body,
+                    onValueChange = viewModel::updateBody,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 320.dp),
+                    readOnly = editor.readOnly,
+                    placeholder = {
+                        Text(
+                            if (editor.readOnly) "只读内容" else "开始记录，支持 Markdown…",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    },
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(
+                        color = MaterialTheme.colorScheme.onSurface,
+                        lineHeight = 26.sp
+                    ),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color.Transparent,
+                        unfocusedBorderColor = Color.Transparent,
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent,
+                        cursorColor = MaterialTheme.colorScheme.primary
+                    )
                 )
-            )
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,

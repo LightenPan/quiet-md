@@ -84,8 +84,8 @@ class NoteViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun selectFolder(folder: String?) {
-        _ui.update { it.copy(selectedFolder = folder) }
+    fun browseFolder(folder: String?) {
+        _ui.update { it.copy(viewMode = ViewMode.ALL, selectedFolder = folder) }
         refresh()
     }
 

@@ -71,6 +71,8 @@ object SyncLimits {
     const val SCAN_TIMEOUT_SECONDS = 120L
     const val TRANSFER_TIMEOUT_SECONDS = 300L
     const val REQUEST_TIMEOUT_SECONDS = 60L
+    const val INITIAL_REQUEST_INTERVAL_MS = 250L
+    const val INITIAL_REQUEST_BUDGET = 520
 }
 
 object SyncPaths {

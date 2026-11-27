@@ -3,6 +3,8 @@ package com.zhaoolee.notes.sync
 import android.content.Context
 import android.os.Build
 import com.google.gson.GsonBuilder
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.Clock
 
@@ -21,8 +23,13 @@ class NutstoreSyncController(
 
     fun hasPassword(): Boolean = currentConnection()?.let { hasPassword(it) } ?: false
 
-    fun hasPassword(config: WebDavConfig): Boolean =
-        runCatching { credentials.load(config) }.getOrNull() != null
+    fun hasPassword(config: WebDavConfig): Boolean = savedPassword(config) != null
+
+    fun savedPassword(config: WebDavConfig): String? =
+        runCatching { credentials.load(config) }.getOrNull()
+
+    suspend fun listRemoteFolders(config: WebDavConfig, password: String, path: String): List<RemoteEntry> =
+        NutstoreWebDavClient(config, password).browse(path)
 
     fun connect(config: WebDavConfig, password: String) {
         val normalized = WebDavConfig.create(config.server, config.username, config.remoteRoot)
@@ -35,13 +42,17 @@ class NutstoreSyncController(
     suspend fun sync(
         config: WebDavConfig,
         password: String,
-        policy: InitialPolicy = InitialPolicy.ASK
+        policy: InitialPolicy = InitialPolicy.ASK,
+        onProgress: ((SyncProgress) -> Unit)? = null
     ): SyncOutcome {
         connect(config, password)
-        return sync(policy)
+        return sync(policy, onProgress)
     }
 
-    suspend fun sync(policy: InitialPolicy = InitialPolicy.ASK): SyncOutcome {
+    suspend fun sync(
+        policy: InitialPolicy = InitialPolicy.ASK,
+        onProgress: ((SyncProgress) -> Unit)? = null
+    ): SyncOutcome {
         val config = connections.load()
             ?: throw SyncException("请先填写坚果云连接信息")
         val password = credentials.load(config)
@@ -49,10 +60,18 @@ class NutstoreSyncController(
         if (!libraryRoot.isDirectory && !libraryRoot.mkdirs()) {
             throw SyncException("无法创建本地文件库：${libraryRoot.path}")
         }
-        val api = NutstoreWebDavClient(config, password)
+        val stateStore = SyncStateStore(stateDir)
+        val initial = !withContext(Dispatchers.IO) { stateStore.isScanComplete() }
+        val api = NutstoreWebDavClient(
+            config,
+            password,
+            requestIntervalMs = if (initial) SyncLimits.INITIAL_REQUEST_INTERVAL_MS else 0,
+            requestBudget = if (initial) SyncLimits.INITIAL_REQUEST_BUDGET else null
+        )
         val engine = NutstoreSyncEngine(
             SyncOptions(libraryRoot, stateDir, config, deviceName, clock),
-            stateStore = SyncStateStore(stateDir)
+            stateStore = stateStore,
+            onProgress = onProgress
         )
         return engine.sync(api, policy)
     }
