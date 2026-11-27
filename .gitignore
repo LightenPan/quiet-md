@@ -14,3 +14,12 @@
 
 # The web demo (web/build.sh, web/bundle.py): build output, deployed with the site.
 /site/public/demo/
+
+# The Android client (mobile/android): Gradle build output and machine-local files.
+/mobile/android/.gradle/
+/mobile/android/.kotlin/
+/mobile/android/build/
+/mobile/android/app/build/
+/mobile/android/local.properties
+/mobile/android/.idea/
+*.iml

@@ -1,0 +1,1 @@
+-keep class com.zhaoolee.notes.data.** { *; }

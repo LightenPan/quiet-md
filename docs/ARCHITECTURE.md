@@ -184,7 +184,7 @@ User titles, body text, attachment names and saved button labels are user conten
 
 ### Android client
 
-The experimental Android client lives in `third/smartisan-notes/android` as a separate Kotlin/Compose project. Its canonical library is app-private `filesDir/Quiet.md`; Markdown files and folders are authoritative, local metadata carries pin/favorite state, and legacy Room rows are migrated without deleting the database. Nutstore WebDAV sync is implemented directly in Kotlin without a third-party cloud SDK. The specification, non-goals, test plan and release/licensing gate are in [design/android.md](design/android.md).
+The experimental Android client lives in `mobile/android` as a separate Kotlin/Compose project. Its canonical library is app-private `filesDir/Quiet.md`; Markdown files and folders are authoritative, local metadata carries pin/favorite state, and legacy Room rows are migrated without deleting the database. Nutstore WebDAV sync is implemented directly in Kotlin without a third-party cloud SDK. The specification, non-goals, test plan and release/licensing gate are in [design/android.md](design/android.md).
 
 ## Undo for folders and file operations
 

@@ -3,7 +3,7 @@
 状态：第一期已实现（2026-11-25）。本地文件库、旧便签迁移、坚果云同步、Compose 界面、
 WorkManager 周期任务和端到端持久化测试均已完成。
 
-参考实现：`third/smartisan-notes/android`。本规格只覆盖 Android 客户端；桌面端继续按
+实现：`mobile/android`。本规格只覆盖 Android 客户端；桌面端继续按
 [`nutstore-sync.md`](../nutstore-sync.md) 工作。Git、iCloud 和其他第三方云盘同步不在本期范围内。
 
 ## 1. 目标
@@ -403,7 +403,7 @@ remoteRoot  Quiet.md
 构建命令：
 
 ```text
-cd third/smartisan-notes/android
+cd mobile/android
 gradlew.bat testDebugUnitTest
 gradlew.bat connectedDebugAndroidTest
 gradlew.bat assembleDebug
@@ -493,12 +493,12 @@ gradlew.bat assembleDebug
 
 ## 14. 许可与发布门槛
 
-`third/smartisan-notes` 当前没有 LICENSE/COPYING，且是独立 Git 仓库。第一期可把它作为
-内部原型继续实现，但在公开发布、合并进入主仓库或分发 APK 前必须：
+客户端已迁入本仓库 `mobile/android`（2026-11-26，来自 `LightenPan/smartisan-notes` 的
+`60bb59e`，原 `zhaoolee` 生态的便签项目为 Apache-2.0），来源记录在 `THIRD_PARTY.md`。
+fork 链上没有单独的 LICENSE 文件，公开发布或分发 APK 前仍必须：
 
-1. 确认原 `zhaoolee/notes` 和当前仓库的代码所有权与许可；
-2. 在 `THIRD_PARTY.md` 记录来源和许可；
-3. 为 Quiet.md 使用自己的 application ID、图标、应用名和签名；
-4. 移除无法确认授权的素材。
+1. 确认各贡献者（zhaoolee、b8yg7vjstj-ctrl、LightenPan）的代码所有权与许可；
+2. 为 Quiet.md 使用自己的 application ID、图标、应用名和签名；
+3. 移除无法确认授权的素材。
 
 未完成以上事项时，不得对外称其为 Quiet.md 正式 Android 版。

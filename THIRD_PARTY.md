@@ -789,6 +789,9 @@ rough.js, hachure-fill, points-on-curve, points-on-path, path-data-parser, perfe
 |---|---|
 | `assets/mermaid/mermaid.min.js.zlib` (Mermaid 11.17.2, `dist/mermaid.min.js` from the npm package, zlib-compressed; macOS and Windows builds only) | MIT (2014-2022 Knut Sveidqvist). See the adjacent `LICENSE`. Unmodified. The bundle includes its npm dependencies (among them d3, dagre-d3-es, cytoscape, KaTeX, marked, roughjs, langium and chevrotain, and DOMPurify) under MIT, ISC, BSD-3-Clause and Apache-2.0 terms, DOMPurify under Apache-2.0 or MPL-2.0; their license comments stay in the file. It runs only in an off-screen system web view to draw diagrams (src/mermaid.rs). |
 
+## Android client
+
+The experimental Android client in `mobile/android` derives from the Smartisan-notes family of notes projects inspired by Smartisan Notes: [zhaoolee/notes](https://github.com/zhaoolee/notes) (Apache-2.0) through the fork [LightenPan/smartisan-notes](https://github.com/LightenPan/smartisan-notes) at `60bb59e`, which carries no LICENSE file of its own. The fork's commits are by zhaoolee, b8yg7vjstj-ctrl and LightenPan. Its Gradle dependencies (Jetpack Compose, Room, WorkManager, OkHttp, Gson) are declared in `mobile/android/app/build.gradle.kts` under their own licenses (Apache-2.0). **The application ID `com.zhaoolee.notes`, the Smartisan-derived icons and the app name are not part of Quiet.md's MIT-licensed assets** and must be replaced before any public distribution; see docs/design/android.md §14.
 ## Windows runtime
 
 The Windows installer includes an unmodified Microsoft Visual C++ Runtime, `vcruntime140.dll`, copied from the Visual Studio x64 Redistributable directory. Microsoft's redistribution terms govern this DLL separately from Quiet.md's MIT license. The source repository does not contain the binary. See [Visual Studio 2022 Redistribution](https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution).
